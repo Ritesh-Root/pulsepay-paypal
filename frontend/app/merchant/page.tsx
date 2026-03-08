@@ -24,14 +24,15 @@ export default function MerchantPage() {
   const [success, setSuccess] = useState(false);
   const [transactionId, setTransactionId] = useState('');
   const [step, setStep] = useState('scan'); // scan, fingerprint, otp, success, error
+  const [displayedConfidence, setDisplayedConfidence] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   const challenges = [
-    'Please look directly at camera',
-    'Hold still',
-    'Ensure good lighting'
+    'Please blink twice',
+    'Turn your head slightly left',
+    'Hold up 2 fingers'
   ];
 
   // Calculate tier based on amount
@@ -70,7 +71,6 @@ export default function MerchantPage() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
       }
-      setChallenge(challenges[Math.floor(Math.random() * challenges.length)]);
     } catch (err) {
       setError('Camera access denied. Please enable camera permissions.');
     }
@@ -83,11 +83,33 @@ export default function MerchantPage() {
     }
   };
 
+  const animateConfidence = (targetScore: number) => {
+    setDisplayedConfidence(0);
+    const duration = 2000; // 2 seconds
+    const steps = 60; // 60 frames for smooth animation
+    const increment = targetScore / steps;
+    const intervalTime = duration / steps;
+
+    let currentStep = 0;
+    const interval = setInterval(() => {
+      currentStep++;
+      if (currentStep >= steps) {
+        setDisplayedConfidence(targetScore);
+        clearInterval(interval);
+      } else {
+        setDisplayedConfidence(Math.floor(currentStep * increment));
+      }
+    }, intervalTime);
+  };
+
   const handleScanCustomer = async () => {
     if (!amount || parseFloat(amount) <= 0) {
       setError('Please enter a valid amount');
       return;
     }
+
+    // Pick a new random challenge on every scan attempt
+    setChallenge(challenges[Math.floor(Math.random() * challenges.length)]);
 
     setLoading(true);
     setError('');
@@ -125,6 +147,7 @@ export default function MerchantPage() {
 
       setFaceHash(hashData.hash);
       setConfidence(hashData.confidence || 85);
+      animateConfidence(hashData.confidence || 85);
 
       // Authenticate
       const authResponse = await fetch(`${API_URL}/api/payment/authenticate`, {
@@ -286,6 +309,7 @@ export default function MerchantPage() {
     setFaceHash('');
     setFingerprintHash('');
     setConfidence(0);
+    setDisplayedConfidence(0);
     setWalletId('');
     setBalance(0);
     setOtp('');
@@ -302,8 +326,9 @@ export default function MerchantPage() {
   };
 
   const getConfidenceColor = () => {
-    if (confidence >= 90) return 'text-green-600';
-    if (confidence >= 70) return 'text-amber-600';
+    const score = displayedConfidence;
+    if (score >= 90) return 'text-green-600';
+    if (score >= 70) return 'text-amber-600';
     return 'text-red-600';
   };
 
@@ -408,7 +433,7 @@ export default function MerchantPage() {
             {/* Confidence Score */}
             {confidence > 0 && (
               <div className="text-center">
-                <div className={`text-6xl font-bold ${getConfidenceColor()}`}>{confidence}</div>
+                <div className={`text-6xl font-bold ${getConfidenceColor()}`}>{displayedConfidence}</div>
                 <div className="text-gray-600">Identity Confidence Score</div>
               </div>
             )}
@@ -418,9 +443,17 @@ export default function MerchantPage() {
               <button
                 onClick={handleScanCustomer}
                 disabled={loading || !amount}
-                className="w-full bg-green-600 text-white py-4 rounded-lg font-semibold text-xl hover:bg-green-700 disabled:bg-gray-400 transition"
+                className="w-full bg-green-600 text-white py-4 rounded-lg font-semibold text-xl hover:bg-green-700 disabled:bg-gray-400 transition flex items-center justify-center gap-2"
               >
-                {loading ? 'Processing...' : 'Scan Customer'}
+                {loading ? (
+                  <>
+                    <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Processing...
+                  </>
+                ) : 'Scan Customer'}
               </button>
             ) : null}
 
@@ -453,9 +486,17 @@ export default function MerchantPage() {
             <button
               onClick={handleCaptureFingerprint}
               disabled={loading}
-              className="w-full bg-amber-600 text-white py-3 rounded-lg font-semibold hover:bg-amber-700 disabled:bg-gray-400 transition"
+              className="w-full bg-amber-600 text-white py-3 rounded-lg font-semibold hover:bg-amber-700 disabled:bg-gray-400 transition flex items-center justify-center gap-2"
             >
-              {loading ? 'Processing...' : 'Capture Fingerprint'}
+              {loading ? (
+                <>
+                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Processing...
+                </>
+              ) : 'Capture Fingerprint'}
             </button>
           </div>
         )}
@@ -476,9 +517,17 @@ export default function MerchantPage() {
             <button
               onClick={handleOTPSubmit}
               disabled={loading || otp.length !== 6}
-              className="w-full bg-red-600 text-white py-3 rounded-lg font-semibold hover:bg-red-700 disabled:bg-gray-400 transition"
+              className="w-full bg-red-600 text-white py-3 rounded-lg font-semibold hover:bg-red-700 disabled:bg-gray-400 transition flex items-center justify-center gap-2"
             >
-              {loading ? 'Processing...' : 'Verify & Pay'}
+              {loading ? (
+                <>
+                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Processing...
+                </>
+              ) : 'Verify & Pay'}
             </button>
           </div>
         )}

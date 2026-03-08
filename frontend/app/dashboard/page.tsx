@@ -21,6 +21,7 @@ export default function DashboardPage() {
   const [delegateName, setDelegateName] = useState('');
   const [spendingCap, setSpendingCap] = useState(500);
   const [cameraActive, setCameraActive] = useState(false);
+  const [distressTesting, setDistressTesting] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -219,6 +220,32 @@ export default function DashboardPage() {
     setLoading(false);
   };
 
+  const handleTestDistress = async () => {
+    setDistressTesting(true);
+    setError('');
+    try {
+      const response = await fetch(`${API_URL}/api/payment/distress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_id: walletId,
+          gps_lat: 28.7041,
+          gps_lng: 77.1025,
+          distress_message: 'Test SOS alert from dashboard'
+        })
+      });
+      const data = await response.json();
+      if (data.success) {
+        alert('✅ SOS Alert Sent!\n\nEmergency contacts notified.\nGPS location logged.');
+      } else {
+        setError(data.error || 'Failed to send SOS alert');
+      }
+    } catch (err) {
+      setError('Failed to send SOS alert');
+    }
+    setDistressTesting(false);
+  };
+
   if (loading && !wallet) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
@@ -311,6 +338,33 @@ export default function DashboardPage() {
                   Rotate Key
                 </button>
               </div>
+            </div>
+
+            {/* Distress Mode Section */}
+            <div className="bg-white rounded-lg shadow-lg p-6 border-2 border-red-200">
+              <h2 className="text-2xl font-bold mb-4 text-gray-800 flex items-center gap-2">
+                🚨 Distress Mode
+              </h2>
+              <p className="text-gray-600 mb-4">
+                In an emergency, use your PINKY finger instead of index finger to trigger an SOS alert while making a payment.
+              </p>
+              <div className="bg-red-50 p-4 rounded-lg mb-4">
+                <p className="text-sm text-red-700 mb-2">
+                  <strong>What happens:</strong>
+                </p>
+                <ul className="text-sm text-red-700 list-disc list-inside space-y-1">
+                  <li>Payment proceeds normally to avoid suspicion</li>
+                  <li>Emergency contacts are notified with GPS location</li>
+                  <li>Alert is logged in system for authorities</li>
+                </ul>
+              </div>
+              <button
+                onClick={handleTestDistress}
+                disabled={distressTesting}
+                className="w-full bg-red-600 text-white py-3 rounded-lg font-semibold hover:bg-red-700 disabled:bg-gray-400 transition"
+              >
+                {distressTesting ? 'Sending Test Alert...' : 'Test SOS Alert'}
+              </button>
             </div>
 
             {/* Transaction History */}

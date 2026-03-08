@@ -40,6 +40,10 @@ export default function EnrollPage() {
     } else {
       stopCamera();
     }
+    // Set initial challenge when entering step 2
+    if (step === 2) {
+      setChallenge(challenges[Math.floor(Math.random() * challenges.length)]);
+    }
     return () => stopCamera();
   }, [step]);
 
@@ -51,9 +55,6 @@ export default function EnrollPage() {
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-      }
-      if (step === 2) {
-        setChallenge(challenges[Math.floor(Math.random() * challenges.length)]);
       }
     } catch (err) {
       setError('Camera access denied. Please enable camera permissions.');
@@ -123,6 +124,9 @@ export default function EnrollPage() {
   };
 
   const handleCaptureFace = async () => {
+    // Pick a new random challenge on every scan attempt
+    setChallenge(challenges[Math.floor(Math.random() * challenges.length)]);
+
     setLoading(true);
     setError('');
     setCaptureStatus('Capturing...');

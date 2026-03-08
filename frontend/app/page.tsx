@@ -14,7 +14,7 @@ export default function Home() {
         </div>
 
         {/* Main Action Buttons */}
-        <div className="grid md:grid-cols-2 gap-6 mb-12">
+        <div className="grid md:grid-cols-3 gap-6 mb-12">
           <Link href="/enroll">
             <div className="bg-white rounded-2xl p-8 hover:shadow-2xl transition transform hover:scale-105 cursor-pointer">
               <div className="text-5xl mb-4">🛡️</div>
@@ -31,6 +31,16 @@ export default function Home() {
               <h2 className="text-2xl font-bold text-gray-800 mb-2">Merchant Payment</h2>
               <p className="text-gray-600">
                 Scan customers and accept biometric payments instantly
+              </p>
+            </div>
+          </Link>
+
+          <Link href="/dashboard">
+            <div className="bg-white rounded-2xl p-8 hover:shadow-2xl transition transform hover:scale-105 cursor-pointer">
+              <div className="text-5xl mb-4">🏠</div>
+              <h2 className="text-2xl font-bold text-gray-800 mb-2">Relief Mode</h2>
+              <p className="text-gray-600">
+                View your wallet status, extend time, or request early refund
               </p>
             </div>
           </Link>
