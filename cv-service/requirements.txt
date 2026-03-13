@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+opencv-python
+numpy
+Pillow
+deepface
+python-multipart
+psycopg2-binary
+python-dotenv

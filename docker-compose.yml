@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: pulsepay_postgres
+    environment:
+      POSTGRES_USER: pulsepay
+      POSTGRES_PASSWORD: pulsepay123
+      POSTGRES_DB: pulsepay
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulsepay"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pulsepay_backend
+    environment:
+      DATABASE_URL: postgresql://pulsepay:pulsepay123@postgres:5432/pulsepay
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-test_key}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-test_secret}
+      RAZORPAY_ACCOUNT_NUMBER: ${RAZORPAY_ACCOUNT_NUMBER:-test_account}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-test_sid}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-test_token}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-+1234567890}
+      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_key}
+      CV_SERVICE_URL: http://cv-service:8000
+      PORT: 5000
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: npm start
+
+  cv-service:
+    build:
+      context: ./cv-service
+      dockerfile: Dockerfile
+    container_name: pulsepay_cv_service
+    environment:
+      BACKEND_URL: http://backend:5000
+    ports:
+      - "8000:8000"
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: pulsepay_frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:5000
+      NEXT_PUBLIC_CV_SERVICE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+      - cv-service
+    command: npm run dev
+
+volumes:
+  postgres_data:
