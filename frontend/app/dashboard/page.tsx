@@ -1,11 +1,11 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { api, API_URL, CV_SERVICE_URL } from '../../lib/api';
 import { getSession, clearSession } from '../../lib/session';
 
-export default function DashboardPage() {
+function DashboardContent() {
   const searchParams = useSearchParams();
   const walletIdFromUrl = searchParams.get('wallet_id');
 
@@ -580,5 +580,13 @@ export default function DashboardPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-gray-50 flex items-center justify-center"><p className="text-xl text-gray-600">Loading dashboard...</p></div>}>
+      <DashboardContent />
+    </Suspense>
   );
 }
