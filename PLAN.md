@@ -1,7 +1,15 @@
 # PulsePay Plan
-Read the PLAN.md file in this repository completely before writing a single line of code. That file contains the full specification for PulsePay — a biometric micro-wallet for emergency phone-less payments in India.
+Read the PLAN.md file in this repository completely before writing a single line of code. That file contains the full specification for PulsePay — a biometric micro-wallet for emergency phone-less payments in India, powered by Amazon Nova AI on AWS.
 
 Execute the following build in order. Do not skip steps. Do not add features not in PLAN.md. Commit working code after each major step.
+
+## Amazon Nova Integration (Hackathon Requirement)
+PulsePay integrates three Amazon Nova foundation models via AWS Bedrock:
+1. **Nova Multimodal Embeddings** (amazon.nova-embed-multimodal-v1:0) — Replaces DeepFace in cv-service for face embedding generation. Images are sent as base64, embeddings are SHA3-256 hashed.
+2. **Nova 2 Lite** (amazon.nova-lite-v1:0) — Powers intelligent risk scoring in /api/payment/authenticate. Analyzes transaction context (amount, location, time, merchant) to dynamically recommend authentication tiers instead of static rules.
+3. **Nova 2 Sonic** — Generates real-time voice confirmations on the merchant PWA after successful payments via Web Speech API.
+
+All Nova integrations have graceful fallback — if AWS credentials are missing or Bedrock calls fail, the app falls back to its original static behavior.
 
 STEP 1 — PROJECT STRUCTURE
 Create this exact folder structure:

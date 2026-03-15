@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const { validateUUID } = require('../middleware/validate');
 
 // GET /api/wallet/:wallet_id
 router.get('/:wallet_id', async (req, res) => {
@@ -8,6 +9,15 @@ router.get('/:wallet_id', async (req, res) => {
 
     try {
         const { wallet_id } = req.params;
+
+        if (!validateUUID(wallet_id)) {
+            return res.status(400).json({ error: 'Invalid wallet ID format' });
+        }
+
+        // Check ownership via JWT
+        if (req.user && req.user.walletId !== wallet_id) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
 
         const walletResult = await pool.query(
             'SELECT id, balance, expiry, active, created_at FROM wallets WHERE id = $1',
@@ -22,7 +32,7 @@ router.get('/:wallet_id', async (req, res) => {
 
         // Get transaction history
         const transactionsResult = await pool.query(
-            'SELECT id, merchant_upi, amount, auth_tier, status, created_at FROM transactions WHERE wallet_id = $1 ORDER BY created_at DESC LIMIT 20',
+            'SELECT id, merchant_upi, amount, auth_tier, distress_triggered, status, created_at FROM transactions WHERE wallet_id = $1 ORDER BY created_at DESC LIMIT 20',
             [wallet_id]
         );
 
@@ -70,10 +80,19 @@ router.post('/refund', async (req, res) => {
             [wallet_id]
         );
 
+        // Record refund transaction
+        if (balance > 0) {
+            await pool.query(
+                `INSERT INTO transactions (wallet_id, merchant_upi, amount, confidence_score, auth_tier, status)
+                 VALUES ($1, 'REFUND', $2, 100, 'system', 'refunded')`,
+                [wallet_id, balance]
+            );
+        }
+
         res.json({
             success: true,
             refunded_amount: balance,
-            message: 'Wallet deactivated and balance refunded (mock)'
+            message: 'Wallet deactivated and balance refunded'
         });
     } catch (error) {
         console.error('Error refunding wallet:', error);
@@ -92,13 +111,10 @@ router.post('/extend', async (req, res) => {
             return res.status(400).json({ error: 'Wallet ID required' });
         }
 
-        // Extend expiry by 72 hours
-        const newExpiry = new Date();
-        newExpiry.setHours(newExpiry.getHours() + 72);
-
+        // Extend expiry by 72 hours from current expiry (not from now)
         const result = await pool.query(
-            'UPDATE wallets SET expiry = $1 WHERE id = $2 AND active = true RETURNING expiry',
-            [newExpiry, wallet_id]
+            'UPDATE wallets SET expiry = expiry + INTERVAL \'72 hours\' WHERE id = $1 AND active = true RETURNING expiry',
+            [wallet_id]
         );
 
         if (result.rows.length === 0) {

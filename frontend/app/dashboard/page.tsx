@@ -2,15 +2,14 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
-const CV_SERVICE_URL = process.env.NEXT_PUBLIC_CV_SERVICE_URL || 'http://localhost:8000';
+import { api, API_URL, CV_SERVICE_URL } from '../../lib/api';
+import { getSession, clearSession } from '../../lib/session';
 
 export default function DashboardPage() {
   const searchParams = useSearchParams();
   const walletIdFromUrl = searchParams.get('wallet_id');
 
-  const [walletId, setWalletId] = useState(walletIdFromUrl || '');
+  const [walletId, setWalletId] = useState('');
   const [wallet, setWallet] = useState<any>(null);
   const [transactions, setTransactions] = useState<any[]>([]);
   const [delegates, setDelegates] = useState<any[]>([]);
@@ -22,6 +21,18 @@ export default function DashboardPage() {
   const [spendingCap, setSpendingCap] = useState(500);
   const [cameraActive, setCameraActive] = useState(false);
   const [distressTesting, setDistressTesting] = useState(false);
+
+  useEffect(() => {
+    if (walletIdFromUrl) {
+      setWalletId(walletIdFromUrl);
+    } else {
+      const session = getSession();
+      if (session) {
+        setWalletId(session.walletId);
+      }
+    }
+  }, [walletIdFromUrl]);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -57,9 +68,7 @@ export default function DashboardPage() {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch(`${API_URL}/api/wallet/${walletId}`);
-      const data = await response.json();
-
+      const data = await api.get(`/api/wallet/${walletId}`);
       if (data.wallet) {
         setWallet(data.wallet);
         setTransactions(data.transactions || []);
@@ -74,8 +83,7 @@ export default function DashboardPage() {
 
   const fetchDelegates = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/family/delegates/${walletId}`);
-      const data = await response.json();
+      const data = await api.get(`/api/family/delegates/${walletId}`);
       setDelegates(data.delegates || []);
     } catch (err) {
       console.error('Failed to fetch delegates:', err);
@@ -86,12 +94,7 @@ export default function DashboardPage() {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch(`${API_URL}/api/wallet/extend`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wallet_id: walletId })
-      });
-      const data = await response.json();
+      const data = await api.post('/api/wallet/extend', { wallet_id: walletId });
       if (data.success) {
         await fetchWalletData();
         alert('Wallet extended by 72 hours!');
@@ -112,12 +115,7 @@ export default function DashboardPage() {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch(`${API_URL}/api/wallet/refund`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wallet_id: walletId })
-      });
-      const data = await response.json();
+      const data = await api.post('/api/wallet/refund', { wallet_id: walletId });
       if (data.success) {
         alert(`Refunded ₹${(data.refunded_amount / 100).toFixed(2)}`);
         await fetchWalletData();
@@ -126,6 +124,80 @@ export default function DashboardPage() {
       }
     } catch (err) {
       setError('Failed to refund wallet');
+    }
+    setLoading(false);
+  };
+
+  const handleRotateKey = async () => {
+    if (!confirm('This will generate a new biometric key. You will need to re-scan your face. Continue?')) {
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+
+    try {
+      // Start camera for new face capture
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 }
+      });
+
+      // Create a temporary video element
+      const tempVideo = document.createElement('video');
+      tempVideo.srcObject = stream;
+      tempVideo.autoplay = true;
+      tempVideo.playsInline = true;
+
+      // Wait for video to be ready
+      await new Promise<void>((resolve) => {
+        tempVideo.onloadeddata = () => resolve();
+      });
+
+      // Capture frame
+      const canvas = document.createElement('canvas');
+      canvas.width = tempVideo.videoWidth;
+      canvas.height = tempVideo.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx?.drawImage(tempVideo, 0, 0);
+
+      // Stop camera
+      stream.getTracks().forEach(track => track.stop());
+
+      const blob = await new Promise<Blob>((resolve) => {
+        canvas.toBlob((b) => resolve(b!), 'image/jpeg');
+      });
+
+      // Hash new face
+      const formData = new FormData();
+      formData.append('image', blob, 'face.jpg');
+
+      const hashResponse = await fetch(`${CV_SERVICE_URL}/hash-face`, {
+        method: 'POST',
+        body: formData
+      });
+
+      const hashData = await hashResponse.json();
+
+      if (hashData.error) {
+        setError(hashData.error);
+        setLoading(false);
+        return;
+      }
+
+      // Call rotate-salt endpoint
+      const data = await api.post('/api/wallet/rotate-salt', {
+        wallet_id: walletId,
+        new_face_hash: hashData.hash
+      });
+
+      if (data.success) {
+        alert('Biometric key rotated successfully! Your new face hash is active.');
+        await fetchWalletData();
+      } else {
+        setError(data.error || 'Failed to rotate key');
+      }
+    } catch (err) {
+      setError('Failed to rotate biometric key');
     }
     setLoading(false);
   };
@@ -191,18 +263,12 @@ export default function DashboardPage() {
       }
 
       // Add delegate
-      const response = await fetch(`${API_URL}/api/family/add-delegate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          parent_wallet_id: walletId,
-          delegate_name: delegateName,
-          delegate_face_hash: hashData.hash,
-          spending_cap: spendingCap * 100
-        })
+      const data = await api.post('/api/family/add-delegate', {
+        parent_wallet_id: walletId,
+        delegate_name: delegateName,
+        delegate_face_hash: hashData.hash,
+        spending_cap: spendingCap * 100
       });
-
-      const data = await response.json();
 
       if (data.success) {
         alert('Delegate added successfully!');
@@ -224,19 +290,26 @@ export default function DashboardPage() {
     setDistressTesting(true);
     setError('');
     try {
-      const response = await fetch(`${API_URL}/api/payment/distress`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          wallet_id: walletId,
-          gps_lat: 28.7041,
-          gps_lng: 77.1025,
-          distress_message: 'Test SOS alert from dashboard'
-        })
+      // Get real GPS
+      let gps_lat = 28.7041;
+      let gps_lng = 77.1025;
+      try {
+        const position: GeolocationPosition = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 });
+        });
+        gps_lat = position.coords.latitude;
+        gps_lng = position.coords.longitude;
+      } catch (e) {
+        console.warn('Geolocation unavailable, using fallback coordinates');
+      }
+
+      const data = await api.post('/api/payment/distress', {
+        wallet_id: walletId,
+        gps_lat,
+        gps_lng
       });
-      const data = await response.json();
-      if (data.success) {
-        alert('✅ SOS Alert Sent!\n\nEmergency contacts notified.\nGPS location logged.');
+      if (data.success || data.distress_alert_sent) {
+        alert('SOS Alert Sent!\n\nEmergency contacts notified.\nGPS location logged.');
       } else {
         setError(data.error || 'Failed to send SOS alert');
       }
@@ -332,8 +405,9 @@ export default function DashboardPage() {
                   Refund Now
                 </button>
                 <button
-                  disabled
-                  className="bg-gray-600 text-white py-3 rounded-lg disabled:bg-gray-400"
+                  onClick={handleRotateKey}
+                  disabled={loading}
+                  className="bg-purple-600 text-white py-3 rounded-lg hover:bg-purple-700 disabled:bg-gray-400"
                 >
                   Rotate Key
                 </button>
@@ -343,7 +417,8 @@ export default function DashboardPage() {
             {/* Distress Mode Section */}
             <div className="bg-white rounded-lg shadow-lg p-6 border-2 border-red-200">
               <h2 className="text-2xl font-bold mb-4 text-gray-800 flex items-center gap-2">
-                🚨 Distress Mode
+                <svg className="w-6 h-6 text-red-500 inline-block" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0M3.124 7.5A8.969 8.969 0 0 1 5.292 3m13.416 0a8.969 8.969 0 0 1 2.168 4.5" /></svg>
+                Distress Mode
               </h2>
               <p className="text-gray-600 mb-4">
                 In an emergency, use your PINKY finger instead of index finger to trigger an SOS alert while making a payment.

@@ -38,3 +38,16 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Demo build artifacts
+demo-output/
+ffmpeg-master-latest-win64-gpl/
+ffmpeg.zip
+build-final-video.py
+record-demo.py
+record-app-demo.py
+demo-video.html
+ui-design.png
+
+# Claude config
+.claude/

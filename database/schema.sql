@@ -33,6 +33,7 @@ CREATE TABLE delegated_wallets (
     delegate_face_hash VARCHAR(255),
     delegate_fingerprint_hash VARCHAR(255),
     spending_cap INTEGER,
+    spent_total INTEGER DEFAULT 0,
     active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT NOW()
 );

@@ -19,7 +19,8 @@
     "dotenv": "^16.3.1",
     "cors": "^2.8.5",
     "jsonwebtoken": "^9.0.2",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "@aws-sdk/client-bedrock-runtime": "^3.500.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

@@ -1,78 +1,50 @@
-const twilio = require('twilio');
+let client = null;
 
-// Initialize Twilio client
-const client = twilio(
-    process.env.TWILIO_ACCOUNT_SID || 'test_sid',
-    process.env.TWILIO_AUTH_TOKEN || 'test_token'
-);
+try {
+    const twilio = require('twilio');
+    client = twilio(
+        process.env.TWILIO_ACCOUNT_SID || 'test_sid',
+        process.env.TWILIO_AUTH_TOKEN || 'test_token'
+    );
+} catch (err) {
+    console.warn('Twilio client init skipped (test mode)');
+}
 
 const TWILIO_PHONE = process.env.TWILIO_PHONE_NUMBER || '+1234567890';
 
-/**
- * Send SMS to a phone number
- * @param {string} to - Recipient phone number
- * @param {string} message - Message to send
- * @returns {Promise<Object>} - SMS result
- */
 async function sendSMS(to, message) {
-    try {
-        console.log(`Mock SMS to ${to}: ${message}`);
+    await new Promise(r => setTimeout(r, 300));
 
-        // In production with valid Twilio credentials:
-        // const result = await client.messages.create({
-        //     body: message,
-        //     from: TWILIO_PHONE,
-        //     to: to
-        // });
+    console.log(`[SMS Mock] To: ${to} | Message: ${message}`);
 
-        return {
-            success: true,
-            message_id: `msg_mock_${Date.now()}`,
-            to,
-            status: 'sent'
-        };
-    } catch (error) {
-        console.error('Twilio SMS error:', error);
-        throw error;
-    }
+    return {
+        sid: `SM_mock_${Date.now()}`,
+        status: 'sent',
+        to,
+        from: TWILIO_PHONE,
+        body: message,
+        dateCreated: new Date().toISOString(),
+        direction: 'outbound-api'
+    };
 }
 
-/**
- * Send SOS alert with GPS location
- * @param {string} emergencyContact - Emergency contact phone number
- * @param {string} userName - User's phone number
- * @param {number} gpsLat - GPS latitude
- * @param {number} gpsLng - GPS longitude
- * @returns {Promise<Object>} - SOS result
- */
 async function sendSOS(emergencyContact, userName, gpsLat, gpsLng) {
-    try {
-        const googleMapsLink = `https://www.google.com/maps?q=${gpsLat},${gpsLng}`;
-        const message = `🚨 PULSEPAY DISTRESS ALERT 🚨\n\nUser ${userName} triggered emergency payment mode.\n\nLocation: ${googleMapsLink}\n\nThis is an automated alert. Please check on them immediately.`;
+    const googleMapsLink = `https://www.google.com/maps?q=${gpsLat},${gpsLng}`;
+    const message = `PULSEPAY DISTRESS ALERT\n\nUser ${userName} triggered emergency payment mode.\n\nLocation: ${googleMapsLink}\n\nThis is an automated alert. Please check on them immediately.`;
 
-        console.log(`Mock SOS to ${emergencyContact}: ${message}`);
+    await new Promise(r => setTimeout(r, 300));
 
-        // In production with valid Twilio credentials:
-        // const result = await client.messages.create({
-        //     body: message,
-        //     from: TWILIO_PHONE,
-        //     to: emergencyContact
-        // });
+    console.log(`[SOS Mock] To: ${emergencyContact} | ${message}`);
 
-        return {
-            success: true,
-            message_id: `sos_mock_${Date.now()}`,
-            to: emergencyContact,
-            status: 'sent',
-            location: googleMapsLink
-        };
-    } catch (error) {
-        console.error('Twilio SOS error:', error);
-        throw error;
-    }
+    return {
+        sid: `SM_sos_mock_${Date.now()}`,
+        status: 'sent',
+        to: emergencyContact,
+        from: TWILIO_PHONE,
+        body: message,
+        dateCreated: new Date().toISOString(),
+        location: googleMapsLink
+    };
 }
 
-module.exports = {
-    sendSMS,
-    sendSOS
-};
+module.exports = { sendSMS, sendSOS };
