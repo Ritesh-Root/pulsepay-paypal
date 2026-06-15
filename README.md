@@ -48,7 +48,7 @@ Full detail, data model, flows, compliance mapping, threat model and the **no-lo
 ## Project structure
 
 ```
-/frontend     - Next.js PWA (enrolment, merchant, dashboard)  [pending update to new API]
+/frontend     - Vite + React PWA (enrolment, merchant, dashboard) — wired to the API
 /backend      - Node/Express API: biometric vault, ledger, rails, auth assertion, AUA, consent
 /cv-service   - FastAPI India-resident inference plane (face embedding + liveness)
 /database     - PostgreSQL schema (encrypted templates, double-entry ledger, consent/audit)
@@ -115,7 +115,9 @@ The backend **fails closed**: it will refuse to start if `JWT_SECRET` or `KMS_DA
 
 ## Status
 
-Backend, database schema, and CV service are re-architected to the SBI design (the demoable subset). The **frontend still calls the old API shape** and is the main remaining work — see [PLAN.md](PLAN.md) §4 for the definition-of-done checklist. Real SBI/UIDAI/NPCI/HSM integrations are stubbed behind interfaces (`services/rails.js`, `services/aua.js`, `services/kms.js`, `services/inference.js`) so they swap in without changing calling code.
+Backend, database schema, CV service, **and the Vite + React frontend** are all wired to the fingerprint-primary SBI design. The frontend captures biometrics via the **webcam as a stand-in for the AePS fingerprint scanner** (the captured frame is sent to the India-resident CV service, which returns a vector; in production the primary factor is a real fingerprint scanner). Real SBI/UIDAI/NPCI/HSM integrations are stubbed behind interfaces (`services/rails.js`, `services/aua.js`, `services/kms.js`, `services/inference.js`) so they swap in without changing calling code.
+
+**Run the frontend locally:** `cd frontend && npm install && npm run dev` → http://localhost:3000 (needs the backend + CV service running; camera works on `localhost`).
 
 ## License
 

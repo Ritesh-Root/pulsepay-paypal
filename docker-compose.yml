@@ -77,8 +77,9 @@ services:
       dockerfile: Dockerfile
     container_name: pulsepay_frontend
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:5000
-      NEXT_PUBLIC_CV_SERVICE_URL: http://localhost:8000
+      # The browser talks to host-mapped ports; localhost defaults in lib/api.ts also work.
+      VITE_API_URL: http://localhost:5000
+      VITE_CV_URL: http://localhost:8000
     ports:
       - "3000:3000"
     depends_on:

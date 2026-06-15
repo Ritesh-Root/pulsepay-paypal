@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
-const { authenticateToken } = require('./middleware/auth');
+const { authenticateToken, generateToken } = require('./middleware/auth');
 const kms = require('./services/kms');
 
 const enrollRoutes = require('./routes/enroll');
@@ -76,6 +76,14 @@ app.locals.pool = pool;
 // Public routes
 app.use('/api/enroll', enrollRoutes);
 app.use('/api/voice', voiceRoutes);
+
+// Merchant/terminal session (demo): issues a terminal JWT so the merchant PWA can
+// call the protected /api/payment/* routes. The customer is still identified by
+// biometric 1:N match, not by this token. Production: real merchant onboarding/auth.
+app.post('/api/merchant/session', (req, res) => {
+    const merchantId = '00000000-0000-4000-8000-000000000000'; // synthetic terminal identity
+    res.json({ token: generateToken(merchantId), merchant_upi: req.body?.merchant_upi || null });
+});
 
 // Protected routes (JWT required)
 app.use('/api/payment', authenticateToken, paymentRoutes);
