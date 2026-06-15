@@ -1,163 +1,238 @@
+/**
+ * Enrolment routes (ARCHITECTURE §6.1) — attended in-branch / BC flow.
+ *
+ * Replaces the Amazon build's mocked Aadhaar (aadhaar_verified=true unconditionally),
+ * in-memory OTP Map, OTP echoed in the response, crypto funding path, and SHA3
+ * "biometric hash". Now: AUA/KUA e-KYC (OTP server-side only), explicit DPDP consent,
+ * an encrypted cancelable face TEMPLATE, a DISTINCT duress credential, and a
+ * CBS/UPI-funded min-KYC wallet created atomically with a double-entry ledger credit.
+ */
 const express = require('express');
 const router = express.Router();
-const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
 const { generateToken } = require('../middleware/auth');
-const { validatePhone, validateOTP } = require('../middleware/validate');
+const { validatePhone } = require('../middleware/validate');
+const aua = require('../services/aua');
+const biometric = require('../services/biometric');
+const consent = require('../services/consent');
+const rails = require('../services/rails');
+const audit = require('../services/audit');
 
-// In-memory OTP store (Map with TTL)
-const otpStore = new Map();
+const ENROL_TOKEN_TTL = '15m';
+const WALLET_TTL_HOURS = 72;
+const WALLET_MAX_LIFETIME_DAYS = 7; // hard cap; /extend can never exceed this
 
-function generateMockOTP() {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+function jwtSecret() {
+    const s = process.env.JWT_SECRET;
+    if (!s) throw new Error('FATAL: JWT_SECRET not set (fail-closed).');
+    return s;
 }
 
-// POST /api/enroll/verify-aadhaar
-router.post('/verify-aadhaar', async (req, res) => {
+// POST /api/enroll/request-otp  { reference, phone? }
+// reference identifies the enrolment subject (phone or an Aadhaar reference at the BC).
+router.post('/request-otp', async (req, res) => {
     try {
-        const { phone } = req.body;
-
-        if (!phone || !validatePhone(phone)) {
-            return res.status(400).json({ error: 'Invalid phone number. Must be 10-digit Indian mobile number.' });
+        const { reference, phone } = req.body;
+        const ref = reference || phone;
+        if (!ref) return res.status(400).json({ error: 'reference (or phone) required' });
+        if (phone && !validatePhone(phone)) {
+            return res.status(400).json({ error: 'Invalid phone number' });
         }
-
-        // Generate and store mock OTP
-        const mockOtp = generateMockOTP();
-        otpStore.set(phone, { otp: mockOtp, expires: Date.now() + 5 * 60 * 1000 }); // 5 min TTL
-
-        // Clean expired OTPs
-        for (const [key, val] of otpStore) {
-            if (val.expires < Date.now()) otpStore.delete(key);
-        }
-
-        res.json({
-            success: true,
-            otp_sent: true,
-            message: 'OTP sent successfully (mock)',
-            mock_otp: mockOtp // Exposed for dev/demo - remove in production
-        });
+        const result = await aua.requestEkycOtp({ reference: ref, phone });
+        // NOTE: the OTP is delivered server-side and is NOT in this response.
+        res.json({ success: true, txn_id: result.txn_id, otp_sent: result.otp_sent });
     } catch (error) {
-        console.error('Error in verify-aadhaar:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('request-otp error:', error);
+        res.status(500).json({ error: 'Failed to request OTP' });
     }
 });
 
-// POST /api/enroll/verify-otp
+// POST /api/enroll/verify-otp  { reference, otp }
+// On success returns a short-lived enrolment ticket consumed by create-wallet.
 router.post('/verify-otp', async (req, res) => {
     try {
-        const { phone, otp } = req.body;
+        const { reference, otp, phone } = req.body;
+        const ref = reference || phone;
+        if (!ref || !otp) return res.status(400).json({ error: 'reference and otp required' });
+        if (!/^\d{6}$/.test(String(otp))) return res.status(400).json({ verified: false, error: 'Invalid OTP format' });
 
-        if (!phone || !otp) {
-            return res.status(400).json({ error: 'Phone and OTP required' });
+        const result = await aua.verifyEkycOtp({ reference: ref, otp });
+        if (!result.verified) {
+            return res.status(400).json({ verified: false, error: result.reason || 'OTP verification failed' });
         }
 
-        if (!validateOTP(otp)) {
-            return res.status(400).json({ verified: false, error: 'Invalid OTP format' });
-        }
-
-        // Verify against stored OTP
-        const stored = otpStore.get(phone);
-        if (!stored || stored.expires < Date.now()) {
-            return res.status(400).json({ verified: false, error: 'OTP expired or not found. Please request a new one.' });
-        }
-
-        if (stored.otp !== otp) {
-            return res.status(400).json({ verified: false, error: 'Incorrect OTP' });
-        }
-
-        // OTP verified - remove from store
-        otpStore.delete(phone);
-
-        res.json({
-            verified: true,
-            message: 'Aadhaar verification successful (mock)'
-        });
+        const enrolment_token = jwt.sign(
+            {
+                kind: 'enrolment',
+                reference: ref,
+                phone: phone || null,
+                aadhaar_ref_token: result.aadhaar_ref_token,
+                aua_txn_id: result.aua_txn_id,
+                kyc_tier: result.ekyc.kyc_tier,
+            },
+            jwtSecret(),
+            { expiresIn: ENROL_TOKEN_TTL }
+        );
+        res.json({ verified: true, enrolment_token });
     } catch (error) {
-        console.error('Error in verify-otp:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('verify-otp error:', error);
+        res.status(500).json({ error: 'OTP verification failed' });
     }
 });
 
 // POST /api/enroll/create-wallet
+// Headers: Authorization: Bearer <enrolment_token>
+// Body: { fingerprint_embedding, distress_fingerprint_embedding, face_embedding,
+//         liveness_passed, wallet_pin, amount, phone?, funding_source, language? }
 router.post('/create-wallet', async (req, res) => {
     const pool = req.app.locals.pool;
 
+    // Consume the enrolment ticket (proves AUA e-KYC happened).
+    const hdr = req.headers['authorization'];
+    const enrolTok = hdr && hdr.split(' ')[1];
+    let enrol;
     try {
-        const {
-            wallet_id_hash,
-            fingerprint_hash,
-            distress_hash,
-            salt,
-            amount,
-            phone,
-            funding_method,    // 'upi' or 'crypto'
-            funding_address    // UPI ID or crypto wallet address
-        } = req.body;
+        enrol = jwt.verify(enrolTok, jwtSecret());
+        if (enrol.kind !== 'enrolment') throw new Error('wrong token kind');
+    } catch (e) {
+        return res.status(401).json({ error: 'Valid enrolment_token required (complete OTP verification first)' });
+    }
 
-        if (!wallet_id_hash || !fingerprint_hash || !distress_hash || !salt || !amount || !phone) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
+    const {
+        fingerprint_embedding,          // PRIMARY payment finger (vector from a certified scanner)
+        distress_fingerprint_embedding, // a DISTINCT finger -> silent distress
+        face_embedding,                 // step-up factor, required above the amount limit
+        liveness_passed,                // face liveness
+        wallet_pin,                     // knowledge second factor for the base tier
+        amount,
+        funding_source = 'sbi_cbs',
+        language = 'en',
+    } = req.body;
+    const phone = enrol.phone || req.body.phone || null;
 
-        if (!validatePhone(phone)) {
-            return res.status(400).json({ error: 'Invalid phone number' });
-        }
+    // --- input validation -----------------------------------------------------
+    const isVec = (v) => Array.isArray(v) && v.length >= 64;
+    if (!isVec(fingerprint_embedding)) {
+        return res.status(400).json({ error: 'fingerprint_embedding (primary finger vector) required' });
+    }
+    if (!isVec(distress_fingerprint_embedding)) {
+        return res.status(400).json({ error: 'distress_fingerprint_embedding (a DISTINCT finger) required' });
+    }
+    if (!isVec(face_embedding)) {
+        return res.status(400).json({ error: 'face_embedding (for above-limit step-up) required' });
+    }
+    if (liveness_passed !== true) {
+        return res.status(400).json({ error: 'Face liveness check did not pass; cannot enrol' });
+    }
+    if (!/^\d{4,6}$/.test(String(wallet_pin || ''))) {
+        return res.status(400).json({ error: 'wallet_pin (4-6 digits) required' });
+    }
+    if (!['sbi_cbs', 'upi'].includes(funding_source)) {
+        return res.status(400).json({ error: 'funding_source must be sbi_cbs or upi' }); // crypto removed by construction
+    }
+    const amountPaise = Math.round(Number(amount) * 100);
+    if (!Number.isFinite(amountPaise) || amountPaise < 100000 || amountPaise > 200000) {
+        return res.status(400).json({ error: 'Amount must be between Rs 1000 and Rs 2000' });
+    }
 
-        // Convert amount from rupees to paise
-        const amountInPaise = parseInt(amount) * 100;
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
 
-        if (amountInPaise < 100000 || amountInPaise > 200000) {
-            return res.status(400).json({ error: 'Amount must be between Rs 1000 and Rs 2000' });
-        }
-
-        // Set expiry to 72 hours from now
-        const expiry = new Date();
-        expiry.setHours(expiry.getHours() + 72);
-
-        // Check if user exists, if not create
-        let userResult = await pool.query(
-            'SELECT id FROM users WHERE phone = $1',
-            [phone]
-        );
-
+        // 1. user (phone nullable for the phone-less cohort)
         let userId;
-        if (userResult.rows.length === 0) {
-            const newUserResult = await pool.query(
-                'INSERT INTO users (phone, aadhaar_verified) VALUES ($1, $2) RETURNING id',
-                [phone, true]
+        if (phone) {
+            const existing = await client.query('SELECT id FROM users WHERE phone = $1', [phone]);
+            userId = existing.rows[0]?.id;
+        }
+        const pinHash = await bcrypt.hash(String(wallet_pin), 10);
+        if (!userId) {
+            const u = await client.query(
+                'INSERT INTO users (phone, emergency_contact, pin_hash) VALUES ($1, $2, $3) RETURNING id',
+                [phone, req.body.emergency_contact || null, pinHash]
             );
-            userId = newUserResult.rows[0].id;
+            userId = u.rows[0].id;
         } else {
-            userId = userResult.rows[0].id;
+            await client.query('UPDATE users SET pin_hash = $1 WHERE id = $2', [pinHash, userId]);
         }
 
-        // Create wallet
-        const walletResult = await pool.query(
-            `INSERT INTO wallets (user_id, wallet_id_hash, fingerprint_hash, distress_hash, salt, balance, expiry, active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             RETURNING id, balance, expiry`,
-            [userId, wallet_id_hash, fingerprint_hash, distress_hash, salt, amountInPaise, expiry, true]
+        // 2. KYC profile (min-KYC) + segregated Aadhaar token vault
+        await client.query(
+            `INSERT INTO kyc_profiles (user_id, kyc_tier, verified_via, screened_at)
+             VALUES ($1, $2, 'aua_kua', NOW())`,
+            [userId, enrol.kyc_tier || 'min']
+        );
+        await client.query(
+            `INSERT INTO aadhaar_token_vault (user_id, aadhaar_ref_token, aua_txn_id)
+             VALUES ($1, $2, $3)`,
+            [userId, enrol.aadhaar_ref_token, enrol.aua_txn_id]
         );
 
-        const wallet = walletResult.rows[0];
+        // 3. explicit DPDP consent (per purpose)
+        await consent.recordEnrolmentConsent(client, { subjectId: userId, channel: 'branch', language });
 
-        // Generate JWT token
-        const token = generateToken(userId, wallet.id);
+        // 4. encrypted, cancelable templates (vectors, NOT hashes):
+        //    primary finger (auth), distinct finger (distress), face (auth, step-up).
+        async function storeTemplate(type, purpose, embedding) {
+            const t = biometric.protect(embedding);
+            await client.query(
+                `INSERT INTO biometric_templates
+                   (subject_id, template_type, purpose, protected_vector, enc_iv, enc_tag, transform_salt, kms_key_ref, model_version)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'cv-india:v1')`,
+                [userId, type, purpose, t.protected_vector, t.enc_iv, t.enc_tag, t.transform_salt, t.kms_key_ref]
+            );
+        }
+        await storeTemplate('fingerprint', 'auth', fingerprint_embedding);
+        await storeTemplate('fingerprint', 'distress', distress_fingerprint_embedding);
+        await storeTemplate('face', 'auth', face_embedding);
 
-        // Log funding method
-        const method = funding_method || 'upi';
-        console.log(`Wallet ${wallet.id} funded via ${method}${funding_address ? ` (${funding_address})` : ''}`);
+        // 6. fund the wallet over SBI/NPCI rails (NOT Razorpay)
+        const funded = await rails.fund({ amountPaise, fundingSource: funding_source, walletId: 'pending' });
+        if (!funded.ok) throw new Error('Funding failed on rails');
 
+        const now = Date.now();
+        const expiry = new Date(now + WALLET_TTL_HOURS * 3600 * 1000);
+        const maxLifetime = new Date(now + WALLET_MAX_LIFETIME_DAYS * 24 * 3600 * 1000);
+
+        const w = await client.query(
+            `INSERT INTO wallets (user_id, cbs_account_ref, funding_source, balance, expiry, max_lifetime)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, balance, expiry`,
+            [userId, `SBIW${crypto.randomBytes(4).toString('hex')}`, funding_source, amountPaise, expiry, maxLifetime]
+        );
+        const wallet = w.rows[0];
+
+        // 7. double-entry ledger credit (source of truth)
+        await client.query(
+            `INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after, idempotency_key, upi_utr, status)
+             VALUES ($1, 'credit', $2, $3, $4, $5, 'settled')`,
+            [wallet.id, amountPaise, amountPaise, `fund:${wallet.id}`, funded.utr]
+        );
+
+        await audit.append(client, {
+            actor: 'enrolment', action: 'wallet_created', subjectUserId: userId,
+            resourceRef: wallet.id, ip: req.ip,
+        });
+
+        await client.query('COMMIT');
+
+        const token = generateToken(userId);
         res.json({
             wallet_id: wallet.id,
-            balance: wallet.balance,
+            balance: Number(wallet.balance),
             expiry: wallet.expiry,
-            funding_method: method,
+            funding_source,
             token,
-            message: `Wallet created successfully via ${method === 'crypto' ? 'Crypto' : 'UPI'}`
+            message: 'Wallet created (min-KYC, 72h expiry, funded via SBI/NPCI rails)',
         });
     } catch (error) {
-        console.error('Error in create-wallet:', error);
+        await client.query('ROLLBACK');
+        console.error('create-wallet error:', error);
         res.status(500).json({ error: 'Failed to create wallet' });
+    } finally {
+        client.release();
     }
 });
 

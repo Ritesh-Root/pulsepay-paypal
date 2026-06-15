@@ -1,184 +1,143 @@
-# PulsePay Plan
-Read the PLAN.md file in this repository completely before writing a single line of code. That file contains the full specification for PulsePay — a biometric micro-wallet for emergency phone-less payments in India, powered by Amazon Nova AI on AWS.
+# PulsePay-SBI — Build Plan
 
-Execute the following build in order. Do not skip steps. Do not add features not in PLAN.md. Commit working code after each major step.
+**Biometric, phone-less micro-wallet for financial inclusion — build plan for the State Bank of India (SBI) hackathon.**
 
-## Amazon Nova Integration (Hackathon Requirement)
-PulsePay integrates three Amazon Nova foundation models via AWS Bedrock:
-1. **Nova Multimodal Embeddings** (amazon.nova-embed-multimodal-v1:0) — Replaces DeepFace in cv-service for face embedding generation. Images are sent as base64, embeddings are SHA3-256 hashed.
-2. **Nova 2 Lite** (amazon.nova-lite-v1:0) — Powers intelligent risk scoring in /api/payment/authenticate. Analyzes transaction context (amount, location, time, merchant) to dynamically recommend authentication tiers instead of static rules.
-3. **Nova 2 Sonic** — Generates real-time voice confirmations on the merchant PWA after successful payments via Web Speech API.
+> **Re-targeting note.** The previous `PLAN.md` (preserved in git history) targeted the *Amazon Nova* hackathon and was scored on depth of Amazon Nova / AWS Bedrock usage. This plan targets **SBI**, which judges financial inclusion, RBI compliance, data localization, NPCI/UPI rail fit, integration with SBI (YONO / Core Banking), DPDP privacy, security, and bank-scale soundness. Amazon Nova is reduced to **one optional, swappable provider** behind a model-agnostic interface — never a hard dependency, never in the data-residency path.
+>
+> Read [ARCHITECTURE.md](ARCHITECTURE.md) before building. This plan is the dependency-ordered sequence; the architecture is the *why*.
 
-All Nova integrations have graceful fallback — if AWS credentials are missing or Bedrock calls fail, the app falls back to its original static behavior.
+---
 
-STEP 1 — PROJECT STRUCTURE
-Create this exact folder structure:
-- /frontend (Next.js 14 App Router + Tailwind CSS + TypeScript)
-- /backend (Node.js + Express)
-- /cv-service (Python FastAPI)
-- /database (PostgreSQL schema)
+## 1. Mission
 
-Initialize frontend by running: npx create-next-app@latest frontend --app --tailwind --typescript --no-git
-Initialize backend with package.json including: express, pg, bcryptjs, twilio, razorpay, dotenv, cors, jsonwebtoken, uuid
-Initialize cv-service with requirements.txt including: fastapi, uvicorn, opencv-python, numpy, Pillow, deepface, python-multipart, psycopg2-binary, python-dotenv
+Let an unbanked or phone-less person pay with their body — **fingerprint + PIN, with a face step-up on larger amounts** — at an SBI merchant / Business Correspondent (BC), funded from a pre-paid, auto-expiring micro-wallet on SBI's books, with a silent distress mode (a distinct finger) for coercion safety. **Every rupee moves over NPCI/SBI rails, every byte of biometric data stays in India, and every payment is RBI-AFA compliant.**
 
-STEP 2 — DATABASE SCHEMA
-Create /database/schema.sql with these exact tables:
+---
 
-users: id UUID primary key, phone varchar unique not null, aadhaar_verified boolean default false, emergency_contact varchar, created_at timestamp default now()
+## 2. Use-case catalogue (each justified)
 
-wallets: id UUID primary key, user_id UUID references users, wallet_id_hash varchar unique not null, fingerprint_hash varchar not null, distress_hash varchar not null, salt varchar not null, balance integer not null, expiry timestamp not null, active boolean default true, created_at timestamp default now()
+Every use case states **why it exists** and **why this approach over the alternative.**
 
-delegated_wallets: id UUID primary key, parent_wallet_id UUID references wallets, delegate_name varchar, delegate_face_hash varchar, delegate_fingerprint_hash varchar, spending_cap integer, active boolean default true
+1. **Assisted in-branch / BC biometric enrolment with consent.**
+   *Why:* the legal basis for capturing biometrics (DPDP explicit consent) + RBI in-person KYC; the entry point for the unbanked.
+   *Why this way:* attended capture over unattended self-enrolment — consent is verifiable at an SBI touchpoint, active-challenge liveness defeats the printed-photo spoof, the target users lack smartphones for video-KYC, and it leverages SBI's branch/BC footprint.
 
-transactions: id UUID primary key, wallet_id UUID references wallets, merchant_upi varchar, amount integer, confidence_score integer, auth_tier varchar, distress_triggered boolean default false, gps_lat decimal, gps_lng decimal, status varchar, created_at timestamp default now()
+2. **Phone-less micro-payment with AFA** (the core "body is your wallet").
+   *Why:* demonstrates the headline value while staying RBI-AFA compliant.
+   *Why this way:* **fingerprint + PIN** as the base two factors (fingerprint runs on SBI's existing AePS scanners), with a **face step-up above an amount limit** and OTP at the top tier — never the deleted single-factor `face_only`; UPI 123Pay rails (NPCI's phone-less product) over a third-party PSP; a single signed Auth Assertion over dual recomputation.
 
-STEP 3 — BACKEND API
-Create /backend/server.js as the main entry point with cors, express.json(), and routes mounted at /api
+3. **Distress payment + silent SOS** (compliant, re-based).
+   *Why:* user-safety under coercion — transact while silently alerting SBI/contacts.
+   *Why this way:* a **distinct distress finger** (every finger is biometrically distinct → FAR≈0 separation; not a same-trait second template, which cross-fires); a **capped** debit with a pre-armed reversal (not full completion = unbounded loss, not refusal = tips off coercer); the **same** atomic ledger + byte-identical response (a separate endpoint leaks "silence" and re-introduces double-spend).
 
-Create /backend/routes/enroll.js with:
-POST /api/enroll/verify-aadhaar — accepts { phone }, returns { success: true, otp_sent: true } — DO NOT call real UIDAI API, mock it completely
-POST /api/enroll/verify-otp — accepts { phone, otp }, always returns { verified: true } for any 6-digit input
-POST /api/enroll/create-wallet — accepts { user_id, wallet_id_hash, fingerprint_hash, distress_hash, salt, amount, phone } — inserts into users and wallets tables, sets expiry to 72 hours from now, returns { wallet_id, expiry, balance }
+4. **Delegate / family spend** (first-class).
+   *Why:* SBI family-inclusion (a parent funding a child/elder/dependent).
+   *Why this way:* full data-principal treatment (own consent, own min-KYC, owner-authenticated enrolment, atomic cumulative cap) over the code's consent-free, auth-free, uncapped carryover.
 
-Create /backend/routes/payment.js with:
-POST /api/payment/authenticate — accepts { face_hash, fingerprint_hash, amount } — queries wallets table for matching wallet_id_hash, applies tier logic (amount under 20000 paise needs face only, under 100000 needs face+finger, above needs face+finger+otp), returns { authenticated, wallet_id, confidence_score, tier, balance }
-POST /api/payment/execute — accepts { wallet_id, amount, merchant_upi, gps_lat, gps_lng } — checks balance and expiry, calls Razorpay payout, deducts balance, inserts transaction, sends Twilio SMS, returns { transaction_id, remaining_balance }
-POST /api/payment/distress — accepts { wallet_id, amount, merchant_upi, gps_lat, gps_lng, emergency_contact } — executes payment normally AND sends SOS SMS via Twilio with GPS Google Maps link
+5. **Data-principal rights & consent withdrawal.**
+   *Why:* mandatory under DPDP — view/correct/erase/withdraw + grievance.
+   *Why this way:* a withdrawal **state machine** (quiesce in-flight settlement → erase template → retain reference-only AML/audit under legal hold) over naive immediate-erase, which contradicts AML retention and orphans in-flight legs.
 
-Create /backend/routes/wallet.js with:
-GET /api/wallet/:wallet_id — returns wallet details including balance, expiry, active status
-POST /api/wallet/refund — deactivates wallet, returns balance to user (mock refund for demo)
-POST /api/wallet/extend — extends expiry by 72 hours
-POST /api/wallet/rotate-salt — generates new random salt, recomputes wallet_id_hash as sha3_256(old_face_embedding_hint + new_salt), updates database, invalidates old hash
+6. **AML monitoring & STR/CTR reporting.**
+   *Why:* PMLA/RBI — continuous monitoring, screening, reporting to SBI's FIU.
+   *Why this way:* continuous **identity-keyed** cross-wallet/cross-expiry monitoring over onboarding-only / per-wallet screening — structuring shows up across wallets, not at one wallet.
 
-Create /backend/routes/family.js with:
-POST /api/family/add-delegate — inserts delegated_wallets record
-GET /api/family/delegates/:parent_wallet_id — returns all active delegates
+7. **Wallet lifecycle: fund (CBS/UPI) → 72h expiry → capped extend → auto-sweep refund.**
+   *Why:* the pre-funded micro-wallet with blast-radius control; RBI small-PPI fit.
+   *Why this way:* enforced expiry + capped, AFA-gated extend + automated ledgered sweep over read-only expiry + uncapped extend (which strands funds and makes the wallet permanent). Funding restricted to CBS/UPI by enum — crypto is an AML/FEMA non-starter.
 
-Create /backend/services/razorpay.js — initialize with env keys, export async payMerchant(merchantUpiId, amountInPaise, walletId) that calls Razorpay payouts API in test mode
+8. **Wallet view + cancelable biometric re-issuance.**
+   *Why:* users must see balance/history and recover from a compromised template.
+   *Why this way:* re-enrolment with liveness + AFA + ownership over the code's `rotate-salt` accepting an arbitrary new hash (a one-call takeover primitive); ownership-checked reads over body-supplied `wallet_id` (which lets any JWT read any wallet).
 
-Create /backend/services/twilio.js — initialize with env keys, export async sendSMS(to, message) and async sendSOS(emergencyContact, userName, gpsLat, gpsLng)
+**Explicitly excluded (with justification):** crypto funding (AML/FEMA); Nova-LLM-as-inline-risk-*decider* (non-deterministic, prompt-injectable, residency-violating — replaced by a deterministic escalate-only scorer); unauthenticated voice endpoint; client-supplied `confidence_score`; mock Razorpay payout; mock Aadhaar / OTP-in-response.
 
-Create /backend/.env.example:
-DATABASE_URL=postgresql://user:password@localhost:5432/pulsepay
-RAZORPAY_KEY_ID=your_key_here
-RAZORPAY_KEY_SECRET=your_secret_here
-RAZORPAY_ACCOUNT_NUMBER=your_account_here
-TWILIO_ACCOUNT_SID=your_sid_here
-TWILIO_AUTH_TOKEN=your_token_here
-TWILIO_PHONE_NUMBER=your_number_here
-JWT_SECRET=your_jwt_secret_here
-CV_SERVICE_URL=http://localhost:8000
-PORT=5000
+---
 
-STEP 4 — PYTHON CV SERVICE
-Create /cv-service/main.py with FastAPI and CORS enabled:
+## 3. Build sequence (dependency-ordered — no forward references)
 
-POST /hash-face — accepts multipart form with image file — uses DeepFace.represent() to get 128-dim embedding, converts float array to string, hashes with hashlib.sha3_256, returns { hash: string, confidence: int, embedding_preview: first 5 values }
+Each phase depends **only** on earlier phases, so the build graph topologically sorts as listed and contains no cycles. Phase 7 (rails) depends only on infra+ledger and can be built in parallel with Phases 2–6.
 
-POST /hash-fingerprint — accepts multipart form with image file — converts to grayscale with OpenCV, applies Gaussian blur, applies binary threshold, finds contours, computes a feature vector from contour areas, hashes with sha3_256, returns { hash: string }
+### Phase 0 — Landing zone & security baseline · `depends_on: []`
+- Provision an India-region landing zone (SBI on-prem / MeitY-empanelled India cloud). Make region a **deploy-time policy guardrail** (deny non-India), not an env var.
+- Stand up an **HA HSM/KMS cluster** (India-resident, key replication) and a Vault/secrets manager.
+- Stand up **multi-AZ HA Postgres** (primary + sync standby, PITR), a **Redis cluster**, private subnets, an API gateway with WAF, **CORS allow-list**, and rate limiting.
+- Centralized observability (structured logs, metrics, tracing) + an immutable audit-log sink.
+- **Delete:** hardcoded secrets (`pulsepay123`, `dev_jwt_secret_key`), CORS `*`, the Render/us-east-1 manifests, Razorpay, the crypto funding path, the dev JWT fallback.
 
-POST /liveness-check — accepts multipart form with image file and challenge_type string — uses DeepFace.extract_faces() to confirm exactly one face detected with confidence above 0.9, returns { liveness_passed: bool, confidence: int, face_detected: bool }
+### Phase 1 — Data model & ledger primitives · `depends_on: [0]`
+- Create all tables (ARCHITECTURE §5) with **BIGINT-paise + CHECK** constraints, the `funding_source` enum, and the segregated Aadhaar token vault.
+- Append-only **double-entry ledger** + unique `idempotency_key` + tamper-evident hash-chained `audit_log` + `consent_records`.
+- Schema, constraints, and encryption-at-rest only — no business logic yet.
 
-Create /cv-service/.env.example with:
-BACKEND_URL=http://localhost:5000
+### Phase 2 — India-resident, model-agnostic inference plane · `depends_on: [0,1]`
+- Biometric embedding provider interface (fingerprint + face); default on-prem ONNX (ArcFace-class) model + fingerprint extractor; ≥2 AZ replicas + hot failover; system-wide egress allow-list.
+- ISO 30107-3 PAD / liveness service; server-side confidence = the real similarity score.
+- Fail-closed behavior + circuit breakers.
 
-STEP 5 — FRONTEND ENROLLMENT PAGE
-Create /frontend/app/enroll/page.tsx as a multi-step enrollment flow:
+### Phase 3 — Protected biometric template vault + matcher · `depends_on: [0,1,2]`
+- Cancelable transform + per-record HSM envelope encryption; cosine-threshold matcher inside the enclave; identifier (UUID) separated from authenticator (template); calibrate FAR/FRR.
 
-Step 1 — Aadhaar Mock Verification:
-Show PulsePay logo and tagline "Your body is your wallet"
-Phone number input field
-"Send OTP" button that calls POST /api/enroll/verify-aadhaar
-OTP input field that appears after send
-"Verify" button that calls POST /api/enroll/verify-otp
-On success show green checkmark and auto-advance to step 2
+### Phase 4 — Consent ledger & DPDP rights service · `depends_on: [1,3]`
+- Per-purpose append-only consent capture; rights API (access/correct/erase) with the withdrawal **state machine**; legal-hold precedence (erase template, retain reference-only AML/audit); breach-notification + grievance-officer workflow.
 
-Step 2 — Face Scan with Challenge-Response Liveness:
-Show live camera feed using getUserMedia in a rounded card
-Show a challenge badge that randomly displays one of: "Please blink twice", "Turn your head slightly left", "Hold up 2 fingers"
-Show "Capture Face" button
-On capture: send frame as blob to cv-service POST /hash-face and POST /liveness-check simultaneously
-Show animated confidence score filling up
-If liveness passed and confidence above 70: show green "Face Captured" badge with first 12 chars of hash
-Auto-advance to step 3
+### Phase 5 — Identity/KYC via AUA-KUA + KYC/AML service · `depends_on: [0,1,4]`
+- Sub-AUA connector to SBI's AUA/KUA + STQC registered devices (encrypted PID, tokenized Aadhaar in the segregated vault, OTP server-side only — never echoed).
+- Tiered KYC (min/full), CKYC, sanctions/PEP screening; degraded offline min-KYC + queued upgrade + circuit breaker.
 
-Step 3 — Fingerprint Scan:
-Show instruction: "Place your INDEX finger close to the camera lens"
-Camera feed open
-"Capture Index Finger" button — sends to cv-service POST /hash-fingerprint — stores as index_hash
-On success show green tick, then show: "Now place your PINKY finger close to the camera"
-"Capture Pinky Finger" button — sends to cv-service — stores as distress_hash
-On both captured show: "Fingerprints enrolled. Index = payment. Pinky = emergency SOS."
-Auto-advance to step 4
+### Phase 6 — Enrolment use case · `depends_on: [2,3,4,5]`
+- Attended branch/BC enrolment: consent → AUA e-KYC → register primary finger + **distinct distress finger** + face (liveness) templates → min-KYC wallet on CBS with 72h expiry.
 
-Step 4 — Fund the Wallet:
-Amount slider from 1000 to 2000 rupees showing rupee value
-Expiry display: "72 hours from now — auto-refunds if unused"
-"Lock Funds via UPI" button that calls POST /api/enroll/create-wallet with all collected data
-On success show full-screen confirmation: wallet ID (first 8 chars), amount locked, expiry time, green shield icon
-Show link to /dashboard
+### Phase 7 — Rails adapter + atomic settlement · `depends_on: [0,1]`
+- `RailsAdapter` over NPCI/UPI/123Pay/CBS; **reserve → settle → confirm (UTR)**, release-on-failure; UTR/CBS reconciliation job. (Build in parallel with 2–6.)
 
-STEP 6 — FRONTEND MERCHANT PWA
-Create /frontend/app/merchant/page.tsx:
+### Phase 8 — Auth decision service · `depends_on: [3,5]`
+- `/authenticate` issues a signed, single-use **Auth Assertion**; deterministic statutory floor; **escalate-only** risk scorer with cold-start default; OTP/UPI-PIN verified against an issued challenge.
 
-Top bar showing "PulsePay Merchant" and a green "Ready to Scan" badge
+### Phase 9 — Payment execution (unified debit path) · `depends_on: [1,7,8]`
+- `/execute` consumes **only** the Auth Assertion; atomic idempotent ledgered debit; ownership/authorization on every route; reserve→settle→confirm via Phase 7.
 
-Main scan area: large circular camera preview with scan animation ring
-Random challenge prompt showing in a pill badge above camera
-"Scan Customer" button
+### Phase 10 — Distress path · `depends_on: [8,9]`
+- Distress = the same debit path triggered by the **distinct distress finger**; capped/decoy debit; byte-identical response; async one-directional SOS; pre-armed reversal; priority AML flag.
 
-After capture: show Identity Confidence Score as a large number (0-100) with animated counter and color coding — red below 70, amber 70-89, green 90-100
+### Phase 11 — Delegate / family · `depends_on: [3,4,5,9]`
+- Owner-authenticated delegate enrolment (own consent + min-KYC + template); atomic cumulative cap; per-delegate expiry; parent notification; AML attribution.
 
-Show authentication tier badge based on amount entered:
-Amount input in rupees below the score
-Tier badge updates in real time as amount changes: "Face Only" in green for under 200, "Face + Fingerprint" in amber for 200-1000, "Face + Fingerprint + OTP" in red for above 1000
+### Phase 12 — Async notifications & confirmations · `depends_on: [9]`
+- Post-commit queued SMS (India DLT gateway) + India-resident/edge Indic-language voice; never inside the debit transaction.
 
-If tier requires fingerprint: show second camera capture for fingerprint
-If tier requires OTP: show OTP input field
+### Phase 13 — Wallet lifecycle jobs · `depends_on: [7,9]`
+- Idempotent batched expiry-sweep auto-refund to CBS; capped AFA-gated extend; cancelable biometric re-issuance (liveness + AFA + ownership).
 
-"Process Payment" button calls POST /api/payment/authenticate then POST /api/payment/execute
-On success: full-screen green confirmation with amount, transaction ID, merchant UPI, timestamp
-On failure: red screen with reason
+### Phase 14 — AML, reconciliation, DR · `depends_on: [5,7,9,10,11]`
+- Identity-keyed cross-wallet velocity/structuring; STR/CTR to FIU; UTR/CBS reconciliation; documented RPO/RTO + tested DR runbooks.
 
-STEP 7 — FRONTEND DASHBOARD
-Create /frontend/app/dashboard/page.tsx:
+---
 
-Wallet status card showing: balance in rupees, expiry countdown timer updating every second, active/expired badge
-Action buttons: Extend 72 Hours, Refund Now, Rotate Biometric Key
-Transaction history table from GET /api/wallet showing: date, amount, merchant, tier used, status
+## 4. Definition of done (acceptance criteria mapped to the fixed flaws)
 
-Family wallet section:
-List of current delegates from GET /api/family/delegates
-"Add Family Member" button that opens a modal with: name input, camera scan for face, spending cap slider, submit button calling POST /api/family/add-delegate
+A phase/feature is done only when the corresponding flaw is provably closed:
 
-STEP 8 — FRONTEND NAVIGATION
-Create /frontend/app/page.tsx as landing page with:
-PulsePay logo, tagline, and two large buttons: "Set Up My Wallet" going to /enroll and "Merchant Payment" going to /merchant
-Brief explanation of the three steps in icons
+- [ ] **Biometric match works:** two separate captures of the same enrolled person authenticate via cosine threshold (not hash equality). *(Flaw 1)*
+- [ ] **Residency:** no biometric/payment data leaves India; the egress allow-list blocks all non-India endpoints across backend, CV, and voice. *(Flaw 2)*
+- [ ] **Rails:** settlement flows over UPI/123Pay/CBS with a real UTR; Razorpay and the crypto path are removed from code and schema. *(Flaw 3)*
+- [ ] **Identity:** Aadhaar runs only through SBI's AUA/KUA; OTP never appears in any response; Aadhaar tokenized in the segregated vault. *(Flaw 4)*
+- [ ] **No double-spend:** concurrent `/execute` calls with the same idempotency key debit exactly once; balance never goes negative; amounts are BIGINT. *(Flaw 5)*
+- [ ] **AFA floor:** no payment completes with a single factor; the risk engine can only raise, never lower, the tier. *(Flaw 4/6)*
+- [ ] **Authorization:** no route accepts a body-supplied `wallet_id` without an ownership/RBAC check. *(Flaw 6)*
+- [ ] **Liveness:** a printed photo fails PAD at the point of sale. *(Flaw 6)*
+- [ ] **Distress is indistinguishable** on the wire and bounded in loss, with a pre-armed reversal. *(Distress)*
+- [ ] **HA/DR:** each SPOF in ARCHITECTURE §10 has a tested failover or fail-closed path. *(Flaw 7)*
+- [ ] **No loops:** the five candidate cycles in ARCHITECTURE §9 are each demonstrably broken.
 
-Create /frontend/app/layout.tsx with proper metadata, title "PulsePay — Your Body Is Your Wallet"
+---
 
-STEP 9 — DOCKER AND README
-Create docker-compose.yml that runs:
-postgres on port 5432 with database name pulsepay
-backend on port 5000 with depends_on postgres
-cv-service on port 8000
-frontend on port 3000 with depends_on backend
+## 5. Open questions (decide before/with SBI)
 
-Create README.md with:
-Project name and tagline
-Setup instructions: clone, copy .env files, fill in Razorpay sandbox and Twilio test keys, run docker-compose up, visit localhost:3000
-Demo flow: enroll at /enroll, then test merchant payment at /merchant
-Feature list covering all features from PLAN.md
+See [ARCHITECTURE.md §11](ARCHITECTURE.md). The blocking one for scope: **is delegate/family in the MVP?** If not, remove the `delegated_wallets` table and code entirely — do not ship it as a non-compliant carryover. The rest (RBI/NPCI numeric thresholds, duress modality, notification channel, CBS settlement model, assertion binding, reversal authority, STQC device availability) are parameterized as provisional config and need SBI confirmation, not a code rewrite.
 
-STEP 10 — FINAL VERIFICATION
-After all files are created:
-Check all frontend API calls point to the correct backend routes
-Check all backend routes connect to the correct database tables
-Check cv-service endpoints match what the frontend calls
-Check Razorpay and Twilio service files are imported correctly in payment.js
-Fix any broken imports, missing dependencies, or type errors found
+---
 
-Commit everything with message: "PulsePay — complete hackathon build: enrollment, merchant PWA, CV service, adaptive auth, distress mode, family wallet, dashboard"
+## 6. One-line pitch for the SBI panel
+
+> *PulsePay lets an unbanked Indian pay with their fingerprint at any SBI Business Correspondent — a face scan adds security on larger amounts — with money on SBI's books, over UPI 123Pay, biometrics encrypted and never leaving India, RBI-AFA compliant, and a silent distress mode (a distinct finger) for coercion safety. Financial inclusion, built on SBI's own rails.*

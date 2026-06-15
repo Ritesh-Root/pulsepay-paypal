@@ -15,12 +15,11 @@
     "pg": "^8.11.3",
     "bcryptjs": "^2.4.3",
     "twilio": "^4.19.0",
-    "razorpay": "^2.9.2",
+    "axios": "^1.6.0",
     "dotenv": "^16.3.1",
     "cors": "^2.8.5",
     "jsonwebtoken": "^9.0.2",
-    "uuid": "^9.0.1",
-    "@aws-sdk/client-bedrock-runtime": "^3.500.0"
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

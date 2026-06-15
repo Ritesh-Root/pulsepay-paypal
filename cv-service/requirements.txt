@@ -1,8 +1,7 @@
 fastapi
 uvicorn
-opencv-python
+opencv-python-headless
 numpy
 Pillow
-boto3
 python-multipart
-psycopg2-binary
+python-dotenv
