@@ -44,7 +44,9 @@ async function requestEkycOtp({ reference, phone }) {
         try { await twilio.sendSMS(phone, `Your SBI PulsePay verification code is ${otp}. Valid 5 minutes.`); }
         catch (e) { console.error('OTP SMS failed:', e.message); }
     }
-    return { txn_id: txnId, otp_sent: true };
+    // dev_otp is surfaced ONLY outside production so the demo is usable without
+    // reading server logs; in production the OTP is delivered solely via SMS.
+    return { txn_id: txnId, otp_sent: true, dev_otp: process.env.NODE_ENV !== 'production' ? otp : undefined };
 }
 
 /**

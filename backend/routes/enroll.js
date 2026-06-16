@@ -42,8 +42,9 @@ router.post('/request-otp', async (req, res) => {
             return res.status(400).json({ error: 'Invalid phone number' });
         }
         const result = await aua.requestEkycOtp({ reference: ref, phone });
-        // NOTE: the OTP is delivered server-side and is NOT in this response.
-        res.json({ success: true, txn_id: result.txn_id, otp_sent: result.otp_sent });
+        // The OTP is delivered server-side (SMS). In non-production we also return
+        // dev_otp so the demo is usable without reading logs.
+        res.json({ success: true, txn_id: result.txn_id, otp_sent: result.otp_sent, ...(result.dev_otp ? { dev_otp: result.dev_otp } : {}) });
     } catch (error) {
         console.error('request-otp error:', error);
         res.status(500).json({ error: 'Failed to request OTP' });

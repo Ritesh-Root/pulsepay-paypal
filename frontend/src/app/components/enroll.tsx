@@ -39,7 +39,7 @@ export function Enroll({ onDone }: { onDone: () => void }) {
     setError(""); setBusy(true);
     const { ok, data } = await api.post("/api/enroll/request-otp", { reference: phone, phone });
     setBusy(false);
-    if (ok && data.otp_sent) setOtpSent(true);
+    if (ok && data.otp_sent) { setOtpSent(true); if (data.dev_otp) setOtp(String(data.dev_otp)); }
     else setError(data.error || "Could not send OTP");
   }
   async function verifyOtp() {
