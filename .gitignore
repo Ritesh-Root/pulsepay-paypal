@@ -51,3 +51,7 @@ ui-design.png
 
 # Claude config
 .claude/
+
+# Agent skills / tooling (installed locally, not project code)
+.agents/
+skills-lock.json
