@@ -1,16 +1,14 @@
-# PulsePay-SBI — Your Body Is Your Wallet
+# PulsePay — Your Fingerprint Is Your Wallet
 
-**Biometric, phone-less micro-wallet for financial inclusion — built for the State Bank of India (SBI) hackathon.**
+**A biometric wallet for phone-light payments.**
 
-PulsePay lets an unbanked or phone-less person pay with their **fingerprint** at any SBI Business Correspondent (a face scan adds security on larger amounts) — money on SBI's books, settled over UPI 123Pay, biometrics encrypted and never leaving India, RBI-AFA compliant, with a silent distress mode for coercion safety.
-
-> **Re-targeted from Amazon Nova → SBI.** This project was originally built for the Amazon Nova hackathon. It has been re-architected for SBI: data localization (RBI), NPCI/UPI rails, UIDAI AUA/KUA identity, DPDP privacy, bank-grade security, and financial inclusion. Amazon Nova is now an optional, swappable model provider behind an India-resident interface — never a hard dependency. See **[ARCHITECTURE.md](ARCHITECTURE.md)** and **[PLAN.md](PLAN.md)**.
+PulsePay lets someone pay with a **fingerprint** and a PIN. Larger amounts can add a face check or a one-time code. Balances sit on a pooled sub-ledger, settlement goes through payment-rail adapters, and biometric templates are stored as encrypted cancelable vectors. Live bank rails, certified capture devices, and legal compliance are **not** claimed by this repository. See [MVP_SCOPE.md](MVP_SCOPE.md), [ARCHITECTURE.md](ARCHITECTURE.md), and [PLAN.md](PLAN.md).
 
 ---
 
-## What changed (and why it matters for SBI)
+## Design choices
 
-| Amazon build (flaw) | SBI build (fix) |
+| Earlier approach | Current approach |
 |---|---|
 | SHA3 hash of embedding + exact-match → **biometrics can never match** | Encrypted, **cancelable vector templates** + cosine-similarity threshold |
 | Face data → **AWS Bedrock us-east-1** (RBI localization breach) | **India-resident** inference plane; system-wide egress allow-list |
@@ -41,7 +39,7 @@ UPI 123Pay assisted terminal ────┤   ┌──────── INDIA
                                              NPCI/UPI/SBI CBS   UIDAI (via SBI AUA/KUA)
 ```
 
-Full detail, data model, flows, compliance mapping, threat model and the **no-loop proof** are in [ARCHITECTURE.md](ARCHITECTURE.md).
+Full detail, data model, flows, and threat model are in [ARCHITECTURE.md](ARCHITECTURE.md). **What is in / out of the demo MVP, the settlement decision, and the honesty matrix (implemented / mocked / tested / deferred) live in [MVP_SCOPE.md](MVP_SCOPE.md).** Design arguments in §9 of ARCHITECTURE are not verified operational proofs.
 
 ---
 
@@ -52,7 +50,7 @@ Full detail, data model, flows, compliance mapping, threat model and the **no-lo
 /backend      - Node/Express API: biometric vault, ledger, rails, auth assertion, AUA, consent
 /cv-service   - FastAPI India-resident inference plane (face embedding + liveness)
 /database     - PostgreSQL schema (encrypted templates, double-entry ledger, consent/audit)
-ARCHITECTURE.md, PLAN.md - the SBI design + build plan
+ARCHITECTURE.md, PLAN.md - design and build plan
 ```
 
 ---
@@ -73,7 +71,7 @@ The backend **fails closed**: it will refuse to start if `JWT_SECRET` or `KMS_DA
 
 ---
 
-## API (SBI build)
+## API
 
 **Enrolment** (attended in-branch / BC)
 - `POST /api/enroll/request-otp` — AUA/KUA e-KYC OTP (sent server-side; **never** in the response)
@@ -104,21 +102,27 @@ The backend **fails closed**: it will refuse to start if `JWT_SECRET` or `KMS_DA
 
 ## Security & compliance highlights
 
-- **RBI data localization** — all biometric/payment data India-resident; egress allow-list.
-- **RBI AFA** — every payment is ≥2 factors; AI can only escalate, never weaken.
-- **DPDP Act 2023** — explicit per-purpose consent ledger; encrypted, cancelable, revocable biometric templates; audit/AML carry no biometric data.
-- **UIDAI** — Aadhaar only via SBI's AUA/KUA; OTP server-side; Aadhaar tokenized + segregated.
-- **Payment integrity** — double-entry ledger, idempotency, reserve→settle→confirm, never debit on rail failure.
-- **No drawbacks / no loops** — see the formal no-loop proof in [ARCHITECTURE.md §9](ARCHITECTURE.md).
+> These are **design intentions**. They are **not** claims of completed legal compliance, certified presentation-attack detection, licensed identity-gateway access, or penetration-test results. See [MVP_SCOPE.md](MVP_SCOPE.md).
+
+- **RBI data localization (intent)** — keep biometric/payment data India-resident; egress allow-list in design.
+- **RBI AFA (intent in code)** — payment path aims for ≥2 factors; risk may escalate only.
+- **DPDP (partial)** — consent records exist; full rights/erasure subsystem not demo-complete.
+- **UIDAI (mocked)** — Aadhaar only via stubbed AUA interface; no production Sub-AUA.
+- **Payment integrity (demo ledger)** — balanced double-entry groups, idempotency, reserve→settle→confirm on stub rails; pending reconcile if confirm fails after rail OK.
+- **Biometrics (mocked)** — webcam stand-in; FAR/FRR unmeasured; 1:N unproven.
 
 ---
 
 ## Status
 
-Backend, database schema, CV service, **and the Vite + React frontend** are all wired to the fingerprint-primary SBI design. The frontend captures biometrics via the **webcam as a stand-in for the AePS fingerprint scanner** (the captured frame is sent to the India-resident CV service, which returns a vector; in production the primary factor is a real fingerprint scanner). Real SBI/UIDAI/NPCI/HSM integrations are stubbed behind interfaces (`services/rails.js`, `services/aua.js`, `services/kms.js`, `services/inference.js`) so they swap in without changing calling code.
+Backend, database schema, CV service, and a **mint-wallet Vite + React frontend** (Home / Send / Request / Bank + Profile for enrol & merchant) are wired to the fingerprint-primary design. Webcam capture is a **mock** for AePS. Real SBI/UIDAI/NPCI/HSM integrations remain stubbed (`services/rails.js`, `aua.js`, `kms.js`).
 
-**Run the frontend locally:** `cd frontend && npm install && npm run dev` → http://localhost:3000 (needs the backend + CV service running; camera works on `localhost`).
+**Settlement model for this codebase:** pooled SBI sub-ledger (demo) — see [MVP_SCOPE.md](MVP_SCOPE.md). Family delegation remains in code but is **deferred** from MVP acceptance.
+
+**Run the frontend locally:** `cd frontend && npm install && npm run dev` → http://localhost:3000 (backend + CV for live enrol/pay; UI works in demo mode without them).
+
+**Schema note:** fresh installs use `database/schema.sql` (includes `request_id`, `counterpart_account`, `pending`, `debit`). Existing Postgres volumes need a recreate or manual ALTER before balanced postings work.
 
 ## License
 
-MIT — re-architected for the SBI hackathon.
+MIT

@@ -1,9 +1,7 @@
-# PulsePay-SBI — Build Plan
+# PulsePay — Build Plan
 
-**Biometric, phone-less micro-wallet for financial inclusion — build plan for the State Bank of India (SBI) hackathon.**
+**Biometric wallet for phone-light payments.**
 
-> **Re-targeting note.** The previous `PLAN.md` (preserved in git history) targeted the *Amazon Nova* hackathon and was scored on depth of Amazon Nova / AWS Bedrock usage. This plan targets **SBI**, which judges financial inclusion, RBI compliance, data localization, NPCI/UPI rail fit, integration with SBI (YONO / Core Banking), DPDP privacy, security, and bank-scale soundness. Amazon Nova is reduced to **one optional, swappable provider** behind a model-agnostic interface — never a hard dependency, never in the data-residency path.
->
 > Read [ARCHITECTURE.md](ARCHITECTURE.md) before building. This plan is the dependency-ordered sequence; the architecture is the *why*.
 
 ---
@@ -50,7 +48,7 @@ Every use case states **why it exists** and **why this approach over the alterna
    *Why:* users must see balance/history and recover from a compromised template.
    *Why this way:* re-enrolment with liveness + AFA + ownership over the code's `rotate-salt` accepting an arbitrary new hash (a one-call takeover primitive); ownership-checked reads over body-supplied `wallet_id` (which lets any JWT read any wallet).
 
-**Explicitly excluded (with justification):** crypto funding (AML/FEMA); Nova-LLM-as-inline-risk-*decider* (non-deterministic, prompt-injectable, residency-violating — replaced by a deterministic escalate-only scorer); unauthenticated voice endpoint; client-supplied `confidence_score`; mock Razorpay payout; mock Aadhaar / OTP-in-response.
+**Explicitly excluded:** crypto funding; letting a language model be the sole payment-tier decider (the risk module may only raise a deterministic floor); an unauthenticated voice endpoint; a client-supplied match score; a mocked third-party payout; returning a one-time code in an API response.
 
 ---
 

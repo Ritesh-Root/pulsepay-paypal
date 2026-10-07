@@ -1,9 +1,8 @@
 /**
  * Voice confirmation route (ARCHITECTURE §4 H26).
  *
- * The merchant needs an audible confirmation in a phone-less flow. The Amazon build
- * shipped financial details to Amazon Nova Sonic in us-east-1 (a data-residency
- * breach). Here we return India-resident, off-critical-path confirmation TEXT that
+ * The merchant needs an audible confirmation in a phone-light flow. This route
+ * returns off-critical-path confirmation text that
  * the merchant PWA speaks with the on-device Web Speech API (local/edge TTS) — no
  * data leaves India and no foreign model is involved. Indic-language ready for the
  * low-literacy inclusion cohort.

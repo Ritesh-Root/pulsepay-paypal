@@ -8,7 +8,7 @@
  * SOS is ONE-DIRECTIONAL and IDEMPOTENT per transaction: at most one SOS per txn,
  * and AML/risk alerting may never call this channel (breaks the alert<->SOS loop).
  *
- * This is an in-process queue stub for the hackathon; production uses a durable
+ * This is an in-process queue stub; production uses a durable
  * broker (e.g. an India-resident queue) with retries + dead-letter. SMS/voice go
  * via an India DLT-registered gateway, not a foreign one.
  */

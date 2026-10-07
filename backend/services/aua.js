@@ -1,6 +1,6 @@
 /**
  * UIDAI AUA/KUA Aadhaar connector — PulsePay as Sub-AUA under SBI's licence
- * (ARCHITECTURE §4.6). STUB for the hackathon; the contract matches a real AUA
+ * (ARCHITECTURE §4.6). Stub adapter; the contract matches a real AUA
  * gateway so calling code is correct.
  *
  * Guarantees encoded here:

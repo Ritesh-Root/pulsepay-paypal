@@ -1,4 +1,4 @@
-# PulsePay-SBI — Demo Video Script (HyperFrames)
+# PulsePay — Demo Video Script
 
 **Target length:** 2:55–3:00 (hard cap 3:00) · **Aspect:** 16:9 (1920×1080) · **FPS:** 30
 **Voice:** HeyGen TTS — warm, professional, Indian-English accent if available.
@@ -79,7 +79,7 @@
 
 **S9 — Close · 2:52–3:00**
 - Visual: `slide-10.jpg` (closing). Hold; logo + details fade in.
-- Caption: *"github.com/Ritesh-Root/Nova-hackathon · Ritesh Kumar Mahato · SOA ITER"*
+- Caption: *"PulsePay — your fingerprint is your wallet"*
 - VO: "PulsePay — your fingerprint is your wallet. Financial inclusion, built on SBI's own rails."
 
 ---

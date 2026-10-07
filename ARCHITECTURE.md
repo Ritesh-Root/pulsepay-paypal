@@ -1,12 +1,14 @@
-# PulsePay-SBI — Architecture
+# PulsePay — Architecture
 
-**Biometric, phone-less micro-wallet for financial inclusion — re-architected for the State Bank of India (SBI) hackathon.**
+**Biometric wallet for phone-light payments.**
 
-> This document supersedes the Amazon Nova–era design. The original build targeted the Amazon Nova hackathon (judged on depth of Amazon Nova / AWS Bedrock usage). SBI judging rewards a different axis entirely: **financial inclusion, RBI compliance, data localization, NPCI/UPI rail fit, integration with SBI (YONO / Core Banking), DPDP privacy, security, and bank-scale operational soundness.** Every component below carries an explicit justification, every use case states *why this approach over the alternative*, and §9 gives a formal proof that the system contains no drawbacks-by-design and no operational or dependency loops.
+> This document describes the **target architecture** for PulsePay. **Controls listed here are design intentions — not verified legal compliance, certified biometrics, or penetration-test evidence.** For what this repo implements, mocks, or defers, see **[MVP_SCOPE.md](MVP_SCOPE.md)**.
+
+> Stubbed identity, payment-rail, and key-management adapters are not a licensed production system.
 
 ---
 
-## 1. What changed from the Amazon build (and why)
+## 1. Design corrections
 
 | # | Confirmed flaw in current code | Where | Fix in this architecture |
 |---|---|---|---|
@@ -18,7 +20,7 @@
 | 6 | Security holes: hardcoded DB password, default JWT secret, CORS `*`, fake Haar-cascade "liveness", no rate limiting, salt beside hash | `docker-compose.yml`, `auth.js`, `server.js:17`, `main.py:34,198-202` | KMS/Vault, scoped CORS, ISO 30107-3 PAD, rate limiting/WAF, cancelable transform (§8) |
 | 7 | No HA / observability / DR | — | Multi-AZ HA, fail-closed degradation, observability, DR runbooks (§10) |
 
-**Kept and reframed (strong for SBI):** the phone-less "body is your wallet" concept; distress / silent-SOS safety; the pre-funded micro-wallet with 72h auto-expiry (blast-radius control); adaptive risk-based authentication; and above all the **financial-inclusion narrative** — SBI has India's largest rural + Business Correspondent (BC) footprint, and the unbanked are its mandate.
+**Kept:** phone-light payment, a distinct distress finger with a silent alert, a pre-funded wallet with a 72-hour expiry, and risk that can only raise the authentication tier.
 
 ---
 
@@ -90,7 +92,7 @@ Each component: **purpose** · **why this over the alternative** · **what it re
 
 ### 4.1 India-Resident, Model-Agnostic Inference Plane
 - **Purpose:** run all face-embedding extraction, liveness/PAD, and risk scoring inside India.
-- **Why this over the alternative:** chosen over "keep Bedrock but move to ap-south-1 (Mumbai)" because (a) the brief requires Nova be optional/swappable, (b) a foreign-controlled control plane still raises RBI data-access concerns for bank-grade systems, (c) SBI judging rewards SBI integration over a single foreign AI vendor. A `FaceEmbeddingProvider` adapter (default on-prem ArcFace-class ONNX; optional India-region managed model) removes vendor lock-in. A network egress guard blocks any endpoint not on the India allow-list — for **all** services, not just embedding.
+- **Why this over the alternative:** inference stays in-region on an on-prem model, with an optional managed model behind the same adapter. A network egress guard blocks endpoints that are not on the India allow-list.
 - **Replaces:** `cv-service/main.py get_nova_embedding()`, `nova.js getEmbedding/assessRisk`, `render.yaml AWS_REGION=us-east-1`.
 
 ### 4.2 Encrypted, Cancelable Biometric Template Vault + Matcher
@@ -129,8 +131,9 @@ Each component: **purpose** · **why this over the alternative** · **what it re
 - **Replaces:** absence of KYC tiers and AML; reframes the 72h expiry as a compliant small-wallet control.
 
 ### 4.9 Atomic Double-Entry Ledger
-- **Purpose:** every money movement is one locked, transactional, idempotent ledger write; balance is derived; `transactions` becomes an immutable journal.
+- **Purpose:** every money movement is one locked, transactional, idempotent ledger write; balance is derived; `transactions` becomes an immutable journal. **Each `request_id` posts a balanced group** (debit/reserve + credit/refund/release that sum to zero) with `counterpart_account` (`pool:sbi_pulsepay` | `merchant:<upi>`). If the rail succeeds but local confirm fails, status is `pending` and `/execute` retries reconcile idempotently.
 - **Why this over the alternative:** the current read-then-write double-spends under concurrency and `INTEGER` overflows. `UPDATE ... WHERE balance >= amount` + unique `idempotency_key` (one namespace spanning execute *and* distress) + BIGINT paise + reserve/release states fixes all three.
+- **Demo settlement:** pooled SBI sub-ledger (see MVP_SCOPE.md) — not CBS-per-user.
 - **Replaces:** `payment.js`/`wallet.js` mutable-balance updates.
 
 ### 4.10 Security, Secrets & Audit Baseline
@@ -190,6 +193,8 @@ State machine: `withdraw_requested → auth_frozen → ledger_quiesced (await in
 
 ## 7. Compliance mapping (regulation → architectural control)
 
+> **Qualification:** the table below maps regulations to *intended* controls. Presence of a row is **not** evidence that PulsePay is legally compliant, licensed as a Sub-AUA, or approved by RBI/UIDAI/NPCI. Partner access and audits are required before any compliance claim.
+
 | Regulation | Requirement | Control in this design |
 |---|---|---|
 | RBI Storage of Payment System Data | All payment data stored only in India | India-resident inference plane + data stores + system-wide egress allow-list (§4.1) |
@@ -219,17 +224,19 @@ State machine: `withdraw_requested → auth_frozen → ledger_quiesced (await in
 
 ---
 
-## 9. Resolved drawbacks & no-loop proof
+## 9. Design DAG argument (not a verified no-loop proof)
 
-The full system is a finite DAG; every path terminates in a terminal state (committed / denied / refunded / erased / SOS-dispatched-once). The five candidate cycles and how each is broken:
+> Previously titled “no drawbacks / no-loop proof.” This section is a **design argument** that candidate cycles are broken *if* the described controls are fully implemented and operated. It is **not** machine-checked, not an operational proof, and not evidence that the demo deployment is loop-free under failure.
 
-1. **Enrolment ↔ Aadhaar-auth** — *broken:* the AUA/KUA leg uses UIDAI's own registered-device biometric, **not** PulsePay's template, and runs once. Two disjoint credential systems → no back-edge.
-2. **Consent-withdrawal ↔ AML-retention ↔ immutable-audit** — *broken by data separation + precedence:* audit/AML records carry no biometric data (reference-only), so retention never forces template re-creation; erasure deletes the vault template once, terminally.
-3. **Consent-withdrawal vs in-flight settlement** — *broken by sequencing:* the withdrawal state machine waits (bounded) for in-flight NPCI legs to reconcile before erasing.
-4. **Risk/AML alert ↔ SOS** — *broken:* AML/risk alerting may never call the SOS channel; SOS dispatch is idempotent per transaction → at most one SOS per txn, no re-entry.
-5. **Auth ↔ risk-engine bootstrap / self-training drift** — *broken:* risk never blocks auth (cold-start returns the deterministic floor); the in-path model never trains online on its own gated outcomes (offline, versioned, human-reviewed only).
+The intended control graph is a finite DAG; every happy path terminates in a terminal state (committed / denied / refunded / erased / SOS-dispatched-once). Five candidate cycles and how the design breaks them:
 
-Retry-storms cannot accumulate debits (idempotency key + never-debit-on-failure); notifications are post-commit and async so a slow notifier cannot stall or re-enter the debit; `/extend` is capped so the wallet cannot live forever; expiry sweeps are dead-lettered (bounded retries), not an unbounded re-credit loop.
+1. **Enrolment ↔ Aadhaar-auth** — *broken in design:* AUA/KUA uses UIDAI registered-device biometrics, not PulsePay templates, once. (Demo: AUA is stubbed.)
+2. **Consent-withdrawal ↔ AML-retention ↔ immutable-audit** — *broken by data separation:* audit/AML hold no biometric payloads; erasure of templates is terminal in the state machine (state machine partially specified; full rights service not MVP).
+3. **Consent-withdrawal vs in-flight settlement** — *broken by sequencing:* wait (bounded) for NPCI legs before erase.
+4. **Risk/AML alert ↔ SOS** — *broken:* SOS is idempotent per txn; AML must not re-enter SOS. Delivery is best-effort.
+5. **Auth ↔ risk-engine bootstrap** — *broken:* escalate-only; cold-start uses deterministic floor; no online self-training in-path.
+
+Idempotency and never-debit-on-rail-failure limit retry storms in the money path. See **MVP_SCOPE.md** for implemented vs mocked status.
 
 ---
 
@@ -247,17 +254,20 @@ DR: documented RPO/RTO with tested runbooks (build Phase 14).
 
 ---
 
-## 11. Open questions (decisions needed from SBI)
+## 11. Open decisions (see also MVP_SCOPE.md)
 
-1. **Delegate/family in or out for the MVP?** It is fully specified (own consent + min-KYC + atomic cap). If timeboxed out, the `delegated_wallets` table/code must be **explicitly removed**, not left as a non-compliant carryover.
-2. **Exact RBI/NPCI numeric thresholds** — min-KYC balance/velocity caps, distress duress-limit, FAR/FRR targets, STR timelines, localization purge windows, assertion TTL — carried as provisional config, to be calibrated to the then-current circulars.
-3. **Duress modality — DECIDED: a distinct enrolled finger** (every finger is biometrically distinct, FAR≈0 separation; no keypad needed; fits the phone-less/low-literacy cohort). Remaining UX validation: helping the rural cohort reliably remember the distress finger under stress.
-4. **Notification channel reality** — is the user truly device-less (alerts to a registered contact / BC device) or do they have feature phones (UPI 123Pay IVR)? Affects the `emergency_contact` requirement.
-5. **CBS settlement model** — real shadow CBS account per user vs a pooled SBI account with a sub-ledger? Affects reconciliation granularity and RBI PPI classification.
-6. **Auth Assertion binding** — exact merchant+amount (strongest, breaks tips/variable amounts) vs merchant+amount-ceiling (chosen default)? Confirm against 123Pay assisted-acceptance UX.
-7. **Distress reversal authority** — automated on SOS confirmation vs manual SBI fraud-desk; fit with the UPI dispute window.
-8. **STQC device availability at BC/CSP kiosks** and SBI sponsoring PulsePay as a Sub-AUA within hackathon scope.
+| Decision | Status | Blocker |
+|---|---|---|
+| MVP: family/delegates | **Deferred** from MVP acceptance (code may remain) | Product timebox |
+| Settlement: CBS-per-user vs pooled sub-ledger | **Demo chooses pooled sub-ledger** | SBI confirmation / PPI classification |
+| RBI/NPCI numeric thresholds | provisional env defaults | Current circulars |
+| Distress finger UX under stress | decided modality; UX unvalidated | Field trial |
+| Notification channel | open | Phone-light vs feature-phone reality |
+| Auth assertion binding (exact vs ceiling) | ceiling default | 123Pay UX |
+| Distress reversal authority | open; SOS/reversal best-effort in demo | Fraud desk policy |
+| STQC devices + Sub-AUA sponsorship | open / not obtained | SBI + UIDAI |
+| Cost / owners / field-trial budget | unknown | No specialist owners in this repo |
 
 ---
 
-*Companion document: [PLAN.md](PLAN.md) — the dependency-ordered build sequence.*
+*Companions: [MVP_SCOPE.md](MVP_SCOPE.md) (acceptance + honesty matrix) · [PLAN.md](PLAN.md) (build sequence).*

@@ -110,7 +110,7 @@ app.use((err, req, res, next) => {
     });
 });
 
-const server = app.listen(PORT, () => console.log(`PulsePay-SBI backend running on port ${PORT}`));
+const server = app.listen(PORT, () => console.log(`PulsePay backend running on port ${PORT}`));
 
 const shutdown = async () => {
     console.log('Shutting down gracefully...');

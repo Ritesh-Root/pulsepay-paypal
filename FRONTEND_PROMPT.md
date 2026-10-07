@@ -1,11 +1,11 @@
-# Front-end re-wiring prompt (PulsePay-SBI)
+# Front-end re-wiring prompt (PulsePay)
 
 Copy everything below the line into your coding agent (Claude Code / Cursor / v0).
 It is self-contained and grounded in the actual backend in this repo.
 
 ---
 
-You are updating the **frontend** of PulsePay, a Next.js (App Router) + TypeScript + Tailwind PWA in `/frontend`. The **backend has been re-architected** for the State Bank of India (SBI) hackathon. Re-wire the frontend to the new API and flows. Read `ARCHITECTURE.md` and `PLAN.md` for context. Do not invent endpoints/fields beyond what is specified; the contracts below are exact.
+You are updating the **frontend** of PulsePay, a Vite + React + TypeScript + Tailwind app in `/frontend`. Re-wire the frontend to the API and flows in this repo. Read `ARCHITECTURE.md` and `PLAN.md` for context. Do not invent endpoints or fields beyond what is specified; the contracts below are exact.
 
 ## Authentication model (important — this drives the UX)
 - **Fingerprint is the PRIMARY payment factor** (everyday amounts) — captured on a fingerprint scanner (or camera fallback). It identifies the wallet 1:N.
@@ -17,7 +17,7 @@ You are updating the **frontend** of PulsePay, a Next.js (App Router) + TypeScri
 - Keep Next.js App Router, TypeScript, Tailwind, and the existing camera/`getUserMedia` capture shells. Change data flow, fields, and copy only.
 - **No dead states, no loops.** Every async path resolves to success or a visible error with retry. Always stop the camera on unmount/step change.
 - Money is rupees in the UI; the backend stores paise (it multiplies `amount` by 100). When reading wallet/transaction amounts, divide paise by 100.
-- Remove all "Amazon Nova" branding. Biometrics are **vectors**, not hashes — never send/show a "hash".
+- Biometrics are **vectors**, not hashes — never send or show a hash. Do not add third-party model branding.
 
 ## Environment
 - `NEXT_PUBLIC_API_URL` (default `http://localhost:5000`) — backend
@@ -115,7 +115,7 @@ Payment routes need a JWT but the merchant terminal has no user. In `backend/ser
 
 ### Task 4 — Shared + copy
 - `lib/api.ts`: add `embedFingerprint`/`embedFace`; ensure the merchant terminal token is used for `/api/payment/*`.
-- `app/page.tsx` + `app/layout.tsx`: remove "Powered by Amazon Nova"; SBI + financial-inclusion + RBI-AFA + India-resident messaging. Change the auth feature copy to **"Fingerprint to pay; face adds security on larger amounts."** Describe Distress Mode as **"a separate finger that pays normally while silently alerting your contact."**
+- App shell copy: **"Fingerprint to pay; face adds security on larger amounts."** Describe distress as **"a separate finger that pays normally while silently alerting your contact."**
 
 ## Acceptance criteria
 - Enrol (2 fingers + face + PIN) → fund → merchant pay: small amount = fingerprint + PIN; above the limit = fingerprint + face; highest = + OTP. Dashboard shows the transaction and reduced balance. No "hash" anywhere.

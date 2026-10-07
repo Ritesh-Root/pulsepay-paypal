@@ -5,7 +5,7 @@
  * rails only. The contract is RESERVE -> SETTLE -> CONFIRM(UTR), or RELEASE on
  * failure. We NEVER fabricate a success id and debit anyway (the old /execute did).
  *
- * This is a stub for the hackathon: real integration plugs SBI CBS APIs + the NPCI
+ * This is a stub adapter: a live integration plugs bank CBS APIs and the NPCI
  * UPI switch behind the same interface. Behaviour (two-phase, UTR, fail-closed) is
  * production-shaped so the calling code is correct as-is.
  */
@@ -59,4 +59,4 @@ async function refund({ amountPaise, walletId, cbsAccountRef }) {
     return { ok: true, utr: utr(), cbs_ref: cbsAccountRef ? `CBS:${cbsAccountRef}` : null };
 }
 
-module.exports = { settle, fund, refund, RAIL };
+module.exports = { settle, fund, refund };
