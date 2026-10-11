@@ -1,11 +1,16 @@
+# PulsePay frontend
 
-  # Design modern clean UI
+React 18 + Vite + Tailwind. One app with two modes:
 
-  This is a code bundle for Design modern clean UI. The original project is available at https://www.figma.com/design/ymG0LhiYCG38xC6vtTzU9D/Design-modern-clean-UI.
+- **User** (the customer's own phone): open a wallet, top up with PayPal, send, close and refund.
+- **Merchant** (the shop's phone): the payment terminal, the dashboard (AG Grid + AG Charts) and the AI assistant. With `DEMO_MODE` on the server, the sign-in screen offers **Try the demo**.
 
-  ## Running the code
+```bash
+npm ci
+npm run dev        # http://localhost:3000
+npm run build      # static build in dist/
+```
 
-  Run `npm i` to install the dependencies.
+`VITE_API_URL` (default `http://localhost:5000`) and `VITE_CV_URL` (default `http://localhost:8000`) point at the backend and the CV service. The dev and preview servers send `Cross-Origin-Opener-Policy: same-origin-allow-popups`, which the PayPal JS SDK v6 popup needs.
 
-  Run `npm run dev` to start the development server.
-  
+See the [project README](../README.md) for the full picture.

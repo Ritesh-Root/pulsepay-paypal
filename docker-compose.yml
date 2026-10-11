@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Secrets come from a root .env (see .env.example). No hardcoded credentials.
 # Required: POSTGRES_PASSWORD, JWT_SECRET, KMS_DATA_KEY. Compose fails without them.
 
@@ -23,6 +21,21 @@ services:
       timeout: 5s
       retries: 5
 
+  # Throwaway database for the backend's database tests (data lives in memory):
+  #   docker compose --profile test up -d postgres-test   then   cd backend && npm run test:db
+  postgres-test:
+    image: postgres:15
+    profiles: ["test"]
+    container_name: pulsepay_testdb
+    environment:
+      POSTGRES_USER: pulsepay_test
+      POSTGRES_PASSWORD: pulsepay_test
+      POSTGRES_DB: pulsepay_test
+    ports:
+      - "127.0.0.1:5434:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+
   backend:
     build:
       context: ./backend
@@ -35,10 +48,28 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-test_sid}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-test_token}
-      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-+910000000000}
-      CV_SERVICE_URL: http://cv-service:8000
-      FACE_MATCH_THRESHOLD: ${FACE_MATCH_THRESHOLD:-0.86}
-      DISTRESS_CAP_PAISE: ${DISTRESS_CAP_PAISE:-50000}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-+10000000000}
+      BIOMETRIC_MATCH_THRESHOLD: ${BIOMETRIC_MATCH_THRESHOLD:-0.86}
+      PER_PAYMENT_LIMIT_CENTS: ${PER_PAYMENT_LIMIT_CENTS:-10000}
+      MAX_BALANCE_CENTS: ${MAX_BALANCE_CENTS:-20000}
+      MIN_FUND_CENTS: ${MIN_FUND_CENTS:-1000}
+      DISTRESS_CAP_CENTS: ${DISTRESS_CAP_CENTS:-2500}
+      PAY_SESSION_TTL: ${PAY_SESSION_TTL:-120}
+      DEMO_SHOW_OTP: ${DEMO_SHOW_OTP:-false}
+      DEMO_MODE: ${DEMO_MODE:-false}
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_ENVIRONMENT: ${PAYPAL_ENVIRONMENT:-sandbox}
+      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+      PAYOUT_MODE: ${PAYOUT_MODE:-manual}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+      BEDROCK_REGION: ${BEDROCK_REGION:-us-east-1}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-zai.glm-5.3}
+      BEDROCK_FALLBACK_MODEL_ID: ${BEDROCK_FALLBACK_MODEL_ID:-zai.glm-5}
+      ZAPIER_WEBHOOK_URL: ${ZAPIER_WEBHOOK_URL:-}
+      ELASTIC_URL: ${ELASTIC_URL:-}
+      ELASTIC_API_KEY: ${ELASTIC_API_KEY:-}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 5000
     ports:
@@ -51,16 +82,16 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    command: npm start
+    # migrate.js brings an existing database volume up to the current schema.
+    command: sh -c "node scripts/migrate.js && node server.js"
 
-  # India-resident CV / inference plane. No public ingress in production (private subnet).
+  # CV / inference plane (camera frame -> vector). No public ingress in production.
   cv-service:
     build:
       context: ./cv-service
       dockerfile: Dockerfile
     container_name: pulsepay_cv_service
     environment:
-      BACKEND_URL: http://backend:5000
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       LIVENESS_THRESHOLD: "0.5"
     ports:

@@ -1,371 +1,378 @@
 /**
- * Payment routes (ARCHITECTURE §6.2, §6.3).
+ * Merchant-device payment flow. Every route needs a
+ * signed-in merchant.
  *
- * Fixes vs the Amazon build:
- *  - ONE authentication decision, carried as a signed single-use Auth Assertion;
- *    /execute re-derives nothing (kills the split-brain).
- *  - Hard AFA floor: face (inherence, real 1:N cosine match) + PIN (knowledge).
- *    No 'face_only'. The risk engine may only escalate.
- *  - Atomic, idempotent, double-entry ledger debit with reserve->settle->confirm.
- *    Never debits on rail failure; never fabricates a success id.
- *  - Distress is folded into the SAME path via a DISTINCT duress PIN: capped debit,
- *    async one-directional SOS, byte-identical response (no wire-observable "silence").
+ *   1. POST /identify  The customer scans a finger or their face. 1:N match ->
+ *                      short-lived pay session. A customer who chose 'both' is
+ *                      asked for the other scan next (1:1 against the same person).
+ *   2. The merchant enters the bill amount.
+ *   3. POST /pay       The customer types their PIN. Limits + risk check -> unified
+ *                      debit; the merchant's balance is then paid out to their
+ *                      registered PayPal account (PayPal Payouts).
+ *   4. The session is consumed by that one payment and the terminal clears itself,
+ *      like a card leaving the reader. POST /cancel ends a session early and every
+ *      session expires after PAY_SESSION_TTL seconds.
+ *
+ * Distress: the customer's distress finger satisfies the fingerprint step exactly
+ * like their payment finger, so the screens, response shapes and step count are the
+ * same. The flag is stored only in pay_sessions; the debit is capped and a silent
+ * SOS goes to the emergency contact.
  */
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcryptjs');
 
+const { AUD, sign, verify } = require('../middleware/auth');
+const { dollarsToCents, usd } = require('../middleware/validate');
 const biometric = require('../services/biometric');
+const pin = require('../services/pin');
 const risk = require('../services/risk');
-const authAssertion = require('../services/authAssertion');
-const rails = require('../services/rails');
+const payments = require('../services/payments');
+const payouts = require('../services/payouts');
+const ledger = require('../services/ledger');
 const notifications = require('../services/notifications');
+const elastic = require('../services/elastic');
 const audit = require('../services/audit');
-const { validateAmount, validateUPI } = require('../middleware/validate');
 
-const DISTRESS_CAP_PAISE = Number(process.env.DISTRESS_CAP_PAISE || 50000); // Rs 500 default
+const SESSION_TTL_SECONDS = Number(process.env.PAY_SESSION_TTL || 120);
+const MAX_FAILED_SCANS = 3;
+const DISTRESS_CAP_CENTS = Number(process.env.DISTRESS_CAP_CENTS || 2500);           // $25
+const PER_PAYMENT_LIMIT_CENTS = Number(process.env.PER_PAYMENT_LIMIT_CENTS || 10000); // $100
 
-// Resolve the customer's active wallet (own first, then delegate).
-async function resolveWallet(pool, subjectId) {
-    const own = await pool.query(
-        `SELECT * FROM wallets WHERE user_id = $1 AND active = true AND expiry > NOW()
-         ORDER BY created_at DESC LIMIT 1`, [subjectId]
+const h = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// Every route acts as a registered, active merchant.
+router.use(h(async (req, res, next) => {
+    const r = await req.app.locals.pool.query(
+        'SELECT * FROM merchants WHERE id = $1 AND active = true', [req.user.id]
     );
-    if (own.rows.length) return { wallet: own.rows[0], isDelegate: false, delegate: null };
+    if (!r.rows.length) return res.status(401).json({ error: 'Merchant account not found', code: 'auth_required' });
+    req.merchant = r.rows[0];
+    next();
+}));
 
-    const deleg = await pool.query(
-        `SELECT w.*, dw.id AS deleg_id, dw.spending_cap, dw.spent_total
-           FROM delegated_wallets dw JOIN wallets w ON dw.parent_wallet_id = w.id
-          WHERE dw.delegate_subject_id = $1 AND dw.active = true AND w.active = true AND w.expiry > NOW()
-          ORDER BY w.created_at DESC LIMIT 1`, [subjectId]
-    );
-    if (deleg.rows.length) return { wallet: deleg.rows[0], isDelegate: true, delegate: deleg.rows[0] };
+// ---- helpers ----------------------------------------------------------------
+
+/** Which scan this session still needs, or null when identification is complete. */
+function nextScan(s) {
+    const m = s.methods_required;
+    if ((m === 'fingerprint' || m === 'both') && !s.fingerprint_ok) return 'fingerprint';
+    if ((m === 'face' || m === 'both') && !s.face_ok) return 'face';
     return null;
 }
 
-// Identity-keyed recent spend (for the escalate-only risk engine).
-async function recentSpend(pool, walletId) {
-    const r = await pool.query(
-        `SELECT amount FROM transactions WHERE wallet_id = $1 AND status = 'completed'
-         ORDER BY created_at DESC LIMIT 10`, [walletId]
-    );
-    return r.rows.map(x => Number(x.amount));
+function isLive(s) {
+    return !s.consumed_at && new Date(s.expires_at) > new Date();
 }
 
-// POST /api/payment/authenticate
-// Body: { fingerprint_embedding:[...], pin, amount, merchant_upi, gps_lat, gps_lng,
-//         face_embedding?:[...] (above-limit step-up), otp?, otp_reference? }
-router.post('/authenticate', async (req, res) => {
-    const pool = req.app.locals.pool;
-    try {
-        const { fingerprint_embedding, pin, amount, merchant_upi, face_embedding } = req.body;
-        if (!Array.isArray(fingerprint_embedding) || !pin || !amount) {
-            return res.status(400).json({ error: 'fingerprint_embedding, pin and amount required' });
-        }
-        if (!validateAmount(amount)) return res.status(400).json({ error: 'Invalid amount' });
-        if (merchant_upi && !validateUPI(merchant_upi)) return res.status(400).json({ error: 'Invalid merchant UPI' });
-        const amountPaise = Math.round(Number(amount) * 100);
-
-        // 1. PRIMARY factor: real 1:N FINGERPRINT identification over active templates
-        //    (both normal-purpose and distress-purpose fingers; owners + delegates).
-        const fpTemplates = await pool.query(
-            `SELECT DISTINCT bt.* FROM biometric_templates bt
-              WHERE bt.active = true AND bt.template_type = 'fingerprint' AND (
-                EXISTS (SELECT 1 FROM wallets w
-                         WHERE w.user_id = bt.subject_id AND w.active = true AND w.expiry > NOW())
-                OR EXISTS (SELECT 1 FROM delegated_wallets dw
-                            JOIN wallets w2 ON dw.parent_wallet_id = w2.id
-                           WHERE dw.delegate_subject_id = bt.subject_id AND dw.active = true
-                             AND w2.active = true AND w2.expiry > NOW())
-              )`
-        );
-        const match = biometric.identify(fingerprint_embedding, fpTemplates.rows);
-        if (!match) {
-            await audit.append(pool, { action: 'auth_fp_no_match', resourceRef: merchant_upi, ip: req.ip });
-            return res.status(404).json({ authenticated: false, error: 'Biometric not recognized' });
-        }
-        // Which finger matched -> normal or silent distress.
-        const matchedRow = fpTemplates.rows.find(r => r.id === match.template_id);
-        const distress = matchedRow && matchedRow.purpose === 'distress';
-
-        const resolved = await resolveWallet(pool, match.subject_id);
-        if (!resolved) return res.status(404).json({ authenticated: false, error: 'No active wallet for this identity' });
-        const { wallet, isDelegate } = resolved;
-
-        // 2. Knowledge factor: PIN (AFA second factor for the base tier).
-        const userRow = await pool.query('SELECT pin_hash FROM users WHERE id = $1', [match.subject_id]);
-        const pinOk = userRow.rows[0]?.pin_hash && await bcrypt.compare(String(pin), userRow.rows[0].pin_hash);
-        if (!pinOk) {
-            await audit.append(pool, { action: 'auth_pin_fail', subjectUserId: match.subject_id, ip: req.ip });
-            return res.status(401).json({ authenticated: false, error: 'Authentication failed' });
-        }
-
-        // 3. Escalate-only tier decision (deterministic floor; risk may only raise).
-        const history = await recentSpend(pool, wallet.id);
-        const tierInfo = risk.decideTier({ amountPaise, now: new Date(), spendingHistory: history });
-
-        // Distress short-circuits the step-up: it must look like (and be as frictionless
-        // as) a normal small payment. The amount is capped downstream in /execute.
-        if (!distress) {
-            // 4. FACE step-up above the limit (additional inherence factor).
-            if (tierInfo.requires_face) {
-                if (!Array.isArray(face_embedding)) {
-                    return res.json({
-                        authenticated: false, tier: tierInfo.tier, requires_face: true,
-                        message: 'Higher amount: face scan required',
-                    });
-                }
-                const faceRows = await pool.query(
-                    `SELECT * FROM biometric_templates
-                      WHERE subject_id = $1 AND template_type = 'face' AND purpose = 'auth' AND active = true`,
-                    [match.subject_id]
-                );
-                const faceOk = faceRows.rows.some(r => biometric.scoreAgainst(face_embedding, r) >= biometric.MATCH_THRESHOLD);
-                if (!faceOk) {
-                    await audit.append(pool, { action: 'auth_face_fail', subjectUserId: match.subject_id, ip: req.ip });
-                    return res.status(401).json({ authenticated: false, error: 'Face verification failed' });
-                }
-            }
-
-            // 5. OTP at the highest tier (issued server-side; verified here).
-            if (tierInfo.requires_otp) {
-                const aua = require('../services/aua');
-                const { otp, otp_reference } = req.body;
-                if (!otp || !otp_reference) {
-                    const reference = `pay:${wallet.id}`;
-                    const phone = userRow.rows[0] && (await pool.query('SELECT phone FROM users WHERE id=$1', [match.subject_id])).rows[0]?.phone;
-                    const issued = await aua.requestEkycOtp({ reference, phone });
-                    return res.json({
-                        authenticated: false, tier: tierInfo.tier, requires_otp: true,
-                        otp_sent: issued.otp_sent, otp_reference: reference,
-                        message: 'High-value transaction: OTP required',
-                    });
-                }
-                const v = await aua.verifyEkycOtp({ reference: otp_reference, otp });
-                if (!v.verified) return res.status(401).json({ authenticated: false, error: 'OTP verification failed' });
-            }
-        }
-
-        // 6. Issue the single-use Auth Assertion (carries distress flag opaquely).
-        const assertion = await authAssertion.issue(pool, {
-            walletId: wallet.id, subjectId: match.subject_id, amountCeiling: amountPaise,
-            merchant: merchant_upi, tier: distress ? `${tierInfo.tier}+distress` : tierInfo.tier,
-            isDelegate,
-        });
-
-        await audit.append(pool, {
-            action: 'auth_assertion_issued', subjectUserId: match.subject_id,
-            resourceRef: wallet.id, ip: req.ip,
-        });
-
-        // Response is identical whether or not distress is set (no wire leak).
-        res.json({
-            authenticated: true,
-            assertion_token: assertion.token,
-            wallet_id: wallet.id,
-            confidence_score: match.confidence_score, // real cosine-derived score
-            tier: tierInfo.tier,
-            balance: Number(wallet.balance),
-            expires_at: assertion.expires_at,
-        });
-    } catch (error) {
-        console.error('authenticate error:', error);
-        res.status(500).json({ error: 'Authentication failed' });
-    }
-});
-
-// POST /api/payment/execute
-// Body: { wallet_id, amount, merchant_upi, assertion_token, gps_lat, gps_lng }
-router.post('/execute', async (req, res) => {
-    const pool = req.app.locals.pool;
-    const { wallet_id, amount, merchant_upi, assertion_token, gps_lat, gps_lng } = req.body;
-
-    if (!wallet_id || !amount || !merchant_upi || !assertion_token) {
-        return res.status(400).json({ error: 'wallet_id, amount, merchant_upi and assertion_token required' });
-    }
-    if (!validateUPI(merchant_upi)) return res.status(400).json({ error: 'Invalid merchant UPI' });
-    let amountPaise = Math.round(Number(amount) * 100);
-
-    // Verify the assertion signature + binding (no consume yet).
-    let claims;
-    try {
-        claims = authAssertion.verifyToken(assertion_token, { walletId: wallet_id, amountPaise, merchant: merchant_upi });
-    } catch (e) {
-        return res.status(401).json({ error: e.message });
-    }
-    const distress = String(claims.tier || '').includes('+distress');
-    if (distress && amountPaise > DISTRESS_CAP_PAISE) {
-        amountPaise = DISTRESS_CAP_PAISE; // cap the attacker-demanded amount; reversal pre-armed
-    }
-    const idemKey = `pay:${claims.aid}`;
-
-    // Idempotent replay: if this assertion already produced a ledger entry, return it.
-    const existing = await pool.query(
-        `SELECT le.*, t.id AS tx_id FROM ledger_entries le
-           LEFT JOIN transactions t ON t.ledger_entry_id = le.id
-          WHERE le.idempotency_key = $1`, [idemKey]
+async function endSession(pool, sessionId) {
+    await pool.query(
+        'UPDATE pay_sessions SET consumed_at = NOW() WHERE id = $1 AND consumed_at IS NULL', [sessionId]
     );
-    if (existing.rows.length) {
-        const e = existing.rows[0];
-        if (e.status === 'settled') {
-            return res.json({
-                transaction_id: e.tx_id, remaining_balance: Number(e.balance_after),
-                status: 'completed', payment_ref: e.upi_utr, timestamp: e.created_at,
-            });
-        }
-        if (e.status === 'released' || e.status === 'failed') {
-            return res.status(502).json({ error: 'Payment failed on rails', status: 'failed' });
-        }
-        return res.status(202).json({ status: 'processing' }); // reserved, settle in flight
-    }
+}
 
-    // --- Phase 1: atomic reserve (consume assertion + lock wallet + debit guard) ---
-    const client = await pool.connect();
-    let reserved;
-    try {
-        await client.query('BEGIN');
-        await authAssertion.consumeWithClient(client, claims.aid); // single-use
+/** Verify a pay-session token for this merchant. Returns the session row or null. */
+async function loadSession(pool, token, merchantId) {
+    let claims;
+    try { claims = verify(String(token || ''), AUD.paySession); } catch { return null; }
+    if (claims.mid !== merchantId) return null;
+    const r = await pool.query('SELECT * FROM pay_sessions WHERE id = $1 AND merchant_id = $2', [claims.sid, merchantId]);
+    return r.rows[0] || null;
+}
 
-        const wr = await client.query('SELECT * FROM wallets WHERE id = $1 FOR UPDATE', [wallet_id]);
-        if (!wr.rows.length || !wr.rows[0].active || new Date(wr.rows[0].expiry) <= new Date()) {
-            throw new Error('wallet_inactive_or_expired');
-        }
-        const wallet = wr.rows[0];
+async function customerLabel(pool, session) {
+    const r = await pool.query(
+        `SELECT u.phone AS subject_phone, o.phone AS owner_phone
+           FROM users u, wallets w JOIN users o ON o.id = w.user_id
+          WHERE u.id = $1 AND w.id = $2`,
+        [session.subject_id, session.wallet_id]
+    );
+    const row = r.rows[0] || {};
+    if (row.subject_phone) return `Customer ••${String(row.subject_phone).slice(-4)}`;
+    return `Family member of ••${String(row.owner_phone || '').slice(-4)}`;
+}
 
-        // Delegate cumulative cap, enforced atomically.
-        if (claims.del) {
-            const dl = await client.query(
-                `SELECT * FROM delegated_wallets WHERE parent_wallet_id = $1 AND delegate_subject_id = $2 AND active = true FOR UPDATE`,
-                [wallet_id, claims.sub]
-            );
-            if (dl.rows.length) {
-                const d = dl.rows[0];
-                if (Number(d.spent_total) + amountPaise > Number(d.spending_cap)) {
-                    throw new Error('delegate_cap_exceeded');
-                }
-                await client.query('UPDATE delegated_wallets SET spent_total = spent_total + $1 WHERE id = $2',
-                    [amountPaise, d.id]);
-            }
-        }
+async function sessionView(pool, session, token) {
+    const next = nextScan(session);
+    return {
+        session_token: token,
+        ready: !next,
+        next_scan: next,
+        expires_at: session.expires_at,
+        customer_label: await customerLabel(pool, session),
+    };
+}
 
-        // Atomic balance guard: only succeeds if funds are sufficient.
-        const upd = await client.query(
-            'UPDATE wallets SET balance = balance - $1 WHERE id = $2 AND balance >= $1 RETURNING balance',
-            [amountPaise, wallet_id]
+// Templates eligible for 1:N: the method must be one the customer chose, and the
+// customer must have an active wallet (as owner or delegate).
+async function candidateTemplates(pool, method) {
+    const r = await pool.query(
+        `SELECT bt.* FROM biometric_templates bt
+           JOIN users u ON u.id = bt.subject_id
+          WHERE bt.active = true AND bt.template_type = $1
+            AND (u.id_method = $1 OR u.id_method = 'both')
+            AND (
+              EXISTS (SELECT 1 FROM wallets w
+                       WHERE w.user_id = bt.subject_id AND w.active = true AND w.expiry > NOW())
+              OR EXISTS (SELECT 1 FROM delegated_wallets dw JOIN wallets w2 ON dw.parent_wallet_id = w2.id
+                          WHERE dw.delegate_subject_id = bt.subject_id AND dw.active = true
+                            AND (dw.per_delegate_expiry IS NULL OR dw.per_delegate_expiry > NOW())
+                            AND w2.active = true AND w2.expiry > NOW())
+            )`,
+        [method]
+    );
+    return r.rows;
+}
+
+// The customer's active wallet: their own first, then one they are a delegate on.
+async function resolveWallet(pool, subjectId) {
+    const own = await pool.query(
+        `SELECT * FROM wallets WHERE user_id = $1 AND active = true AND expiry > NOW()
+          ORDER BY created_at DESC LIMIT 1`, [subjectId]
+    );
+    if (own.rows.length) return { wallet: own.rows[0], isDelegate: false };
+    const deleg = await pool.query(
+        `SELECT w.* FROM delegated_wallets dw JOIN wallets w ON dw.parent_wallet_id = w.id
+          WHERE dw.delegate_subject_id = $1 AND dw.active = true
+            AND (dw.per_delegate_expiry IS NULL OR dw.per_delegate_expiry > NOW())
+            AND w.active = true AND w.expiry > NOW()
+          ORDER BY w.created_at DESC LIMIT 1`, [subjectId]
+    );
+    if (deleg.rows.length) return { wallet: deleg.rows[0], isDelegate: true };
+    return null;
+}
+
+const distressDispatched = new Set(); // session ids (Redis set in prod)
+
+function dispatchDistress(pool, { session, merchant, gps }) {
+    // Fire-and-forget and idempotent per session: never delays or changes the response.
+    if (distressDispatched.has(session.id)) return;
+    distressDispatched.add(session.id);
+    (async () => {
+        const r = await pool.query(
+            `SELECT u.emergency_contact, o.phone AS owner_phone
+               FROM users u, wallets w JOIN users o ON o.id = w.user_id
+              WHERE u.id = $1 AND w.id = $2`,
+            [session.subject_id, session.wallet_id]
         );
-        if (!upd.rows.length) throw new Error('insufficient_balance');
-        const newBalance = Number(upd.rows[0].balance);
-
-        const le = await client.query(
-            `INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after, idempotency_key, auth_assertion_id, status)
-             VALUES ($1, 'reserve', $2, $3, $4, $5, 'reserved') RETURNING id`,
-            [wallet_id, amountPaise, newBalance, idemKey, claims.aid]
-        );
-        reserved = { ledgerId: le.rows[0].id, newBalance, wallet };
-        await client.query('COMMIT');
-    } catch (e) {
-        await client.query('ROLLBACK');
-        client.release();
-        const map = {
-            wallet_inactive_or_expired: [404, 'Wallet not found or expired'],
-            insufficient_balance: [400, 'Insufficient balance'],
-            delegate_cap_exceeded: [403, 'Amount exceeds delegate spending cap'],
-            auth_assertion_already_used_or_expired: [409, 'Authentication already used or expired'],
-        };
-        const [code, msg] = map[e.message] || [500, 'Payment reservation failed'];
-        return res.status(code).json({ error: msg });
-    }
-    client.release();
-
-    // --- Phase 2: settle on the rail (outside the lock) ---
-    const settled = await rails.settle({
-        merchantUpi: merchant_upi, amountPaise, walletId: wallet_id, cbsAccountRef: reserved.wallet.cbs_account_ref,
-    });
-
-    if (!settled.ok) {
-        // Fail closed: RELEASE the reservation (credit back). Never leave money debited on rail failure.
-        const rc = await pool.connect();
-        try {
-            await rc.query('BEGIN');
-            await rc.query('UPDATE wallets SET balance = balance + $1 WHERE id = $2', [amountPaise, wallet_id]);
-            await rc.query("UPDATE ledger_entries SET status = 'released' WHERE id = $1", [reserved.ledgerId]);
-            if (claims.del) {
-                await rc.query(
-                    `UPDATE delegated_wallets SET spent_total = GREATEST(spent_total - $1, 0)
-                       WHERE parent_wallet_id = $2 AND delegate_subject_id = $3`,
-                    [amountPaise, wallet_id, claims.sub]);
-            }
-            await rc.query('COMMIT');
-        } catch (_) { await rc.query('ROLLBACK'); } finally { rc.release(); }
-        return res.status(502).json({ error: 'Payment failed on rails', status: 'failed' });
-    }
-
-    // --- Phase 3: confirm (settled) + immutable journal entry ---
-    let txId, ts;
-    const fc = await pool.connect();
-    try {
-        await fc.query('BEGIN');
-        await fc.query("UPDATE ledger_entries SET status = 'settled', upi_utr = $1, cbs_ref = $2 WHERE id = $3",
-            [settled.utr, settled.cbs_ref, reserved.ledgerId]);
-        const tx = await fc.query(
-            `INSERT INTO transactions (wallet_id, ledger_entry_id, merchant_upi, amount, confidence_score, auth_tier, distress_triggered, gps_lat, gps_lng, status)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'completed') RETURNING id, created_at`,
-            [wallet_id, reserved.ledgerId, merchant_upi, amountPaise, null, claims.tier, distress, gps_lat || null, gps_lng || null]
-        );
-        txId = tx.rows[0].id; ts = tx.rows[0].created_at;
-        await fc.query('COMMIT');
-    } catch (e) {
-        await fc.query('ROLLBACK');
-        console.error('confirm phase error:', e.message);
-    } finally { fc.release(); }
-
-    await audit.append(pool, { action: distress ? 'payment_distress' : 'payment_settled', subjectUserId: claims.sub, resourceRef: wallet_id, ip: req.ip });
-
-    // --- Post-commit, async notifications (never in the money path) ---
-    const u = await pool.query('SELECT phone, emergency_contact FROM users WHERE id = $1', [claims.sub]);
-    const phone = u.rows[0]?.phone;
-    notifications.paymentSms({ phone, amountPaise, merchant: merchant_upi, balancePaise: reserved.newBalance });
-    if (distress) {
+        const row = r.rows[0] || {};
         notifications.silentSOS({
-            transactionId: txId, contact: u.rows[0]?.emergency_contact || phone,
-            userName: 'PulsePay user', gpsLat: gps_lat, gpsLng: gps_lng,
+            transactionId: `distress:${session.id}`,
+            // A delegate's alert goes to the wallet owner. Never to the customer's own
+            // phone: in this product it is usually at home.
+            contact: row.emergency_contact || (session.is_delegate ? row.owner_phone : null),
+            userName: 'A PulsePay customer',
+            gpsLat: gps.lat, gpsLng: gps.lng,
+            place: merchant.display_name,
         });
-        // distress also flagged for AML/priority review
         await pool.query(
             `INSERT INTO aml_alerts (identity_id, rule_id, risk_score, alert_type) VALUES ($1,'duress',100,'distress')`,
-            [claims.sub]
-        ).catch(() => {});
-    }
+            [session.subject_id]
+        );
+    })().catch((e) => console.error('distress dispatch failed:', e.message));
+}
 
-    // Response is byte-identical for normal and distress payments.
-    res.json({
-        transaction_id: txId,
-        remaining_balance: reserved.newBalance,
-        status: 'completed',
-        payment_ref: settled.utr,
-        timestamp: ts,
-    });
-});
+function gpsFrom(body) {
+    const lat = Number(body.gps_lat), lng = Number(body.gps_lng);
+    const ok = Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+    return ok ? { lat, lng } : { lat: null, lng: null };
+}
 
-// POST /api/payment/sos  — panic button (owner-authenticated, SOS only, no payment).
-// (Payment-time duress is handled silently inside the unified flow above.)
-const { requireWalletOwnership } = require('../middleware/auth');
-router.post('/sos', requireWalletOwnership('wallet_id'), async (req, res) => {
+// ---- routes -----------------------------------------------------------------
+
+// POST /api/payment/identify  { method: 'fingerprint'|'face', embedding:[...], session_token? }
+router.post('/identify', h(async (req, res) => {
     const pool = req.app.locals.pool;
-    try {
-        const { gps_lat, gps_lng } = req.body;
-        const u = await pool.query('SELECT phone, emergency_contact FROM users WHERE id = $1', [req.wallet.user_id]);
-        notifications.silentSOS({
-            transactionId: `sos:${req.wallet.id}:${Date.now()}`,
-            contact: u.rows[0]?.emergency_contact || u.rows[0]?.phone,
-            userName: 'PulsePay user', gpsLat: gps_lat, gpsLng: gps_lng,
-        });
-        await audit.append(pool, { action: 'sos_panic', subjectUserId: req.wallet.user_id, resourceRef: req.wallet.id, ip: req.ip });
-        res.json({ success: true, message: 'SOS dispatched' });
-    } catch (e) {
-        console.error('sos error:', e);
-        res.status(500).json({ error: 'Failed to dispatch SOS' });
+    const { method, embedding, session_token } = req.body || {};
+    if (!['fingerprint', 'face'].includes(method)) {
+        return res.status(400).json({ error: "method must be 'fingerprint' or 'face'" });
     }
-});
+    if (!biometric.isEmbedding(embedding)) return res.status(400).json({ error: 'A valid scan is required' });
+
+    // --- second scan for a customer who chose 'both' (1:1 against the same person)
+    if (session_token) {
+        const session = await loadSession(pool, session_token, req.merchant.id);
+        if (!session || !isLive(session)) {
+            return res.status(410).json({ error: 'Session ended. Start again.', expired: true });
+        }
+        const need = nextScan(session);
+        if (!need) return res.json(await sessionView(pool, session, session_token));
+        if (method !== need) return res.status(400).json({ error: `Scan the customer's ${need}` });
+
+        const own = await pool.query(
+            `SELECT * FROM biometric_templates
+              WHERE subject_id = $1 AND template_type = $2 AND active = true`,
+            [session.subject_id, method]
+        );
+        const m = biometric.identify(embedding, own.rows);
+        if (!m || m.ambiguous) {
+            const f = await pool.query(
+                `UPDATE pay_sessions
+                    SET failed_scans = failed_scans + 1,
+                        consumed_at = CASE WHEN failed_scans + 1 >= $2 THEN NOW() ELSE consumed_at END
+                  WHERE id = $1 RETURNING consumed_at`,
+                [session.id, MAX_FAILED_SCANS]
+            );
+            await audit.append(pool, { action: 'identify_second_scan_fail', subjectUserId: session.subject_id, resourceRef: session.id, ip: req.ip });
+            if (f.rows[0]?.consumed_at) {
+                return res.status(410).json({ error: 'Too many failed scans. Start again.', expired: true });
+            }
+            return res.status(401).json({ error: 'Not recognised. Please scan again.' });
+        }
+        const upd = await pool.query(
+            `UPDATE pay_sessions
+                SET fingerprint_ok = fingerprint_ok OR $2, face_ok = face_ok OR $3,
+                    distress = distress OR $4, confidence_score = LEAST(confidence_score, $5)
+              WHERE id = $1 AND consumed_at IS NULL RETURNING *`,
+            [session.id, method === 'fingerprint', method === 'face', m.purpose === 'distress', m.confidence_score]
+        );
+        if (!upd.rows.length) return res.status(410).json({ error: 'Session ended. Start again.', expired: true });
+        return res.json(await sessionView(pool, upd.rows[0], session_token));
+    }
+
+    // --- first scan: 1:N identification
+    const match = biometric.identify(embedding, await candidateTemplates(pool, method));
+    if (!match) {
+        await audit.append(pool, { action: 'identify_no_match', resourceRef: req.merchant.id, ip: req.ip });
+        return res.status(404).json({ error: 'Not recognised. Try again, or try the other scan.' });
+    }
+    if (match.ambiguous) {
+        await audit.append(pool, { action: 'identify_ambiguous', resourceRef: req.merchant.id, ip: req.ip });
+        return res.status(422).json({ error: 'Scan was not clear enough. Please scan again.' });
+    }
+
+    const resolved = await resolveWallet(pool, match.subject_id);
+    if (!resolved) return res.status(404).json({ error: 'No active PulsePay wallet. Ask the customer to top up in the app.' });
+
+    const u = await pool.query('SELECT id_method FROM users WHERE id = $1', [match.subject_id]);
+    const ins = await pool.query(
+        `INSERT INTO pay_sessions
+           (merchant_id, subject_id, wallet_id, is_delegate, distress, methods_required,
+            fingerprint_ok, face_ok, confidence_score, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+        [
+            req.merchant.id, match.subject_id, resolved.wallet.id, resolved.isDelegate,
+            match.purpose === 'distress', u.rows[0].id_method,
+            method === 'fingerprint', method === 'face', match.confidence_score,
+            new Date(Date.now() + SESSION_TTL_SECONDS * 1000),
+        ]
+    );
+    const session = ins.rows[0];
+    const token = sign(AUD.paySession, { sid: session.id, mid: req.merchant.id }, `${SESSION_TTL_SECONDS}s`);
+    await audit.append(pool, { action: 'customer_identified', subjectUserId: match.subject_id, resourceRef: session.id, ip: req.ip });
+    res.json(await sessionView(pool, session, token));
+}));
+
+// POST /api/payment/pay  { session_token, amount (dollars), pin, gps_lat?, gps_lng? }
+router.post('/pay', h(async (req, res) => {
+    const pool = req.app.locals.pool;
+    const body = req.body || {};
+    const session = await loadSession(pool, body.session_token, req.merchant.id);
+    if (!session) return res.status(410).json({ error: 'Session ended. Start again.', expired: true });
+
+    const requestId = `pay:${session.id}`;
+    const gps = gpsFrom(body);
+    const meta = {
+        requestId, walletId: session.wallet_id, kind: 'payment',
+        counterAccount: ledger.merchantAccount(req.merchant.id), counterparty: req.merchant.display_name,
+        merchantId: req.merchant.id,
+        delegateSubjectId: session.is_delegate ? session.subject_id : null, paySessionId: session.id,
+        confidence: session.confidence_score, authTier: `${session.methods_required}+pin`,
+        distress: session.distress, gps,
+    };
+    const send = (out) => {
+        if (out.ok) {
+            return res.json({ status: out.status, transaction_id: out.transaction_id, payment_ref: out.payment_ref, timestamp: out.timestamp });
+        }
+        return res.status(out.http).json({ status: out.status, error: out.error, ...(out.payment_ref ? { payment_ref: out.payment_ref } : {}) });
+    };
+
+    // A retry of a payment that already started reports / reconciles it.
+    const prior = await pool.query('SELECT 1 FROM ledger_entries WHERE idempotency_key = $1', [`${requestId}:wallet`]);
+    if (prior.rows.length) return send(await payments.debit(pool, meta));
+
+    if (!isLive(session)) return res.status(410).json({ error: 'Session ended. Start again.', expired: true });
+    if (nextScan(session)) return res.status(400).json({ error: 'Customer identification is not complete' });
+
+    let amountCents = dollarsToCents(body.amount);
+    if (!amountCents) return res.status(400).json({ error: 'Enter a valid amount' });
+    if (amountCents > PER_PAYMENT_LIMIT_CENTS) {
+        return res.status(400).json({ error: `PulsePay allows up to ${usd(PER_PAYMENT_LIMIT_CENTS)} per payment` });
+    }
+
+    const pinResult = await pin.checkPin(pool, session.subject_id, body.pin);
+    if (!pinResult.ok) {
+        await audit.append(pool, { action: 'pay_pin_fail', subjectUserId: session.subject_id, resourceRef: session.id, ip: req.ip });
+        if (pinResult.locked) await endSession(pool, session.id);
+        return pin.pinFailure(res, pinResult);
+    }
+
+    if (session.distress) {
+        amountCents = Math.min(amountCents, DISTRESS_CAP_CENTS); // bounded loss; reversal is best-effort
+        dispatchDistress(pool, { session, merchant: req.merchant, gps });
+    }
+
+    const verdict = await risk.assess({
+        amountCents, now: new Date(), spendingHistory: await payments.recentSpend(pool, session.wallet_id),
+    });
+    if (verdict.decision === 'decline') {
+        await endSession(pool, session.id);
+        await audit.append(pool, { action: 'pay_risk_declined', subjectUserId: session.subject_id, resourceRef: session.id, ip: req.ip });
+        return res.status(403).json({ status: 'declined', error: 'Payment declined by the risk check' });
+    }
+
+    const out = await payments.debit(pool, {
+        ...meta,
+        amountCents,
+        // Consume the session in the same transaction as the reservation: one session, one payment.
+        beforeReserve: async (client) => {
+            const c = await client.query(
+                `UPDATE pay_sessions SET consumed_at = NOW()
+                  WHERE id = $1 AND consumed_at IS NULL AND expires_at > NOW() RETURNING id`,
+                [session.id]
+            );
+            if (!c.rowCount) {
+                const e = new Error('session_unavailable');
+                e.code = 'session_unavailable';
+                throw e;
+            }
+        },
+    });
+
+    if (out.ok) {
+        await audit.append(pool, {
+            action: session.distress ? 'payment_distress' : 'payment_settled',
+            subjectUserId: session.subject_id, resourceRef: session.wallet_id, ip: req.ip,
+        });
+        const owner = await pool.query(
+            'SELECT u.phone FROM wallets w JOIN users u ON u.id = w.user_id WHERE w.id = $1', [session.wallet_id]
+        );
+        notifications.paymentSms({
+            phone: owner.rows[0]?.phone, amountCents, merchant: req.merchant.display_name,
+            balanceCents: out.remaining_balance,
+        });
+        if (payouts.instantMode()) {
+            payouts.queueAndSubmit(pool, {
+                merchantId: req.merchant.id, account: ledger.merchantAccount(req.merchant.id),
+                recipientEmail: req.merchant.paypal_email, amountCents, sourceRequest: requestId,
+                simulated: req.merchant.is_demo || undefined,
+            });
+        }
+        elastic.index({
+            type: 'payment', merchant_id: req.merchant.id, merchant: req.merchant.display_name,
+            transaction_id: out.transaction_id, amount_usd: amountCents / 100,
+            verified_by: `${session.methods_required} + PIN`, match_score: session.confidence_score,
+        });
+    }
+    // Same response shape for normal and distress payments; no balance on a merchant screen.
+    return send(out);
+}));
+
+// POST /api/payment/cancel  { session_token } — the customer walked away or the merchant reset.
+router.post('/cancel', h(async (req, res) => {
+    const pool = req.app.locals.pool;
+    const session = await loadSession(pool, req.body?.session_token, req.merchant.id);
+    if (session) await endSession(pool, session.id);
+    res.json({ cancelled: true });
+}));
 
 module.exports = router;

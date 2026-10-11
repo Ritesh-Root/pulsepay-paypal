@@ -6,20 +6,23 @@ import { embed } from "../lib/api";
 
 type Phase = "idle" | "starting" | "ready" | "scanning" | "done" | "error";
 
-export type CaptureResult = { embedding: number[]; liveness_passed?: boolean; pad_score?: number };
+type CaptureResult = { embedding: number[]; liveness_passed?: boolean; pad_score?: number };
 
-// Real webcam capture. In production the primary factor is a fingerprint on an
-// AePS scanner; this web demo uses the camera as a stand-in and sends the frame
-// to the India-resident CV service, which returns a vector (no image is stored).
+// Real webcam capture. In production the fingerprint comes from an external
+// fingerprint scanner; this web demo uses the camera as a stand-in and sends the
+// frame to the CV service, which returns a vector (no image is stored).
 export function Capture({
   endpoint,
   label = "Align within the frame",
   requireLiveness = false,
+  noCameraHint,
   onResult,
 }: {
   endpoint: "fingerprint" | "face";
   label?: string;
   requireLiveness?: boolean;
+  /** Shown instead of the camera error when the page offers another way to scan. */
+  noCameraHint?: string;
   onResult: (r: CaptureResult) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -37,7 +40,7 @@ export function Capture({
         if (videoRef.current) videoRef.current.srcObject = stream;
         setPhase("ready");
       } catch {
-        setErr("Camera access denied. Enable the camera to continue.");
+        setErr(noCameraHint || "Camera access denied. Enable the camera to continue.");
         setPhase("error");
       }
     })();

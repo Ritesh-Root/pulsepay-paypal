@@ -1,0 +1,556 @@
+openapi: 3.1.0
+info:
+  title: PulsePay API
+  version: 1.0.0
+  summary: Leave your phone at home — pay with your fingerprint or face plus a PIN.
+  description: |
+    Customers top up a low-limit wallet with **PayPal Checkout**, then pay at a merchant's
+    phone by biometric identification + PIN. Merchants are paid out with **PayPal Payouts**.
+
+    Money is in US dollars. Request amounts are dollar strings/numbers (`"12.50"`);
+    response amounts are integer **cents**.
+
+    Token audiences (Bearer JWT) cannot be swapped:
+    `enrolment` (after phone OTP), `customer` (wallet owner's phone),
+    `merchant` (merchant's phone), `pay-session` (one customer at one terminal, 2 minutes).
+  license: { name: MIT, identifier: MIT }
+servers:
+  - url: http://localhost:5000
+    description: Local (docker compose)
+tags:
+  - { name: Enrolment, description: Customer sign-up / sign-in on their own phone }
+  - { name: Merchant, description: 'Merchant accounts, dashboard, cash-out and refunds' }
+  - { name: Terminal, description: Taking a payment on the merchant's phone }
+  - { name: Wallet, description: The customer's own phone }
+  - { name: PayPal, description: JS SDK config and webhooks }
+  - { name: Assistant, description: AI merchant assistant (GLM on Amazon Bedrock + PayPal Agent Toolkit) }
+  - { name: Family, description: 'Family members with their own biometric, PIN and spending cap (API only)' }
+  - { name: Demo, description: 'One-tap demo shops for judges (only when DEMO_MODE=true; refused with live PayPal)' }
+
+components:
+  securitySchemes:
+    enrolmentToken: { type: http, scheme: bearer, description: From /api/enroll/verify-otp }
+    customerToken: { type: http, scheme: bearer, description: From create-wallet or sign-in }
+    merchantToken: { type: http, scheme: bearer, description: From /api/merchant/verify-otp }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        code: { type: string, description: "auth_required when the token is missing, expired or the wrong kind" }
+    Embedding:
+      type: array
+      minItems: 64
+      maxItems: 4096
+      items: { type: number }
+      description: Biometric vector from the CV service (/embed-fingerprint or /embed-face).
+    Phone:
+      type: string
+      pattern: '^[1-9]\d{9,14}$'
+      examples: ['14155550123']
+    Amount:
+      oneOf: [{ type: string, pattern: '^\d+(\.\d{1,2})?$' }, { type: number }]
+      description: US dollars, up to 2 decimals.
+    OtpRequest:
+      type: object
+      required: [phone]
+      properties: { phone: { $ref: '#/components/schemas/Phone' } }
+    OtpIssued:
+      type: object
+      properties:
+        otp_sent: { type: boolean }
+        demo_otp: { type: string, description: Only when the server runs with DEMO_SHOW_OTP=true }
+    PayPalOrder:
+      type: object
+      properties:
+        order_id: { type: string, description: PayPal order id (approve it with the JS SDK v6) }
+        simulated: { type: boolean }
+        amount: { type: integer, description: cents }
+        currency: { type: string, const: USD }
+    WalletCreated:
+      type: object
+      properties:
+        wallet_id: { type: string, format: uuid }
+        balance: { type: integer, description: cents }
+        currency: { type: string }
+        expiry: { type: string, format: date-time }
+        funded_by: { type: string, enum: [paypal, simulated] }
+        token: { type: string, description: customer token }
+    PaySession:
+      type: object
+      properties:
+        session_token: { type: string }
+        ready: { type: boolean, description: true when identification is complete }
+        next_scan: { type: [string, 'null'], enum: [fingerprint, face, null] }
+        expires_at: { type: string, format: date-time }
+        customer_label: { type: string, examples: ['Customer ••0123'] }
+    PaymentResult:
+      type: object
+      properties:
+        status: { type: string, enum: [completed] }
+        transaction_id: { type: string, format: uuid }
+        payment_ref: { type: string }
+        timestamp: { type: string, format: date-time }
+    Balance:
+      type: object
+      properties:
+        owed: { type: integer, description: cents PulsePay owes the merchant }
+        in_flight: { type: integer, description: cents in PayPal payouts not yet finished }
+        available: { type: integer, description: cents that can be cashed out now }
+
+paths:
+  /api/enroll/request-otp:
+    post:
+      operationId: requestEnrolmentOtp
+      security: []
+      tags: [Enrolment]
+      summary: Send a one-time code to the customer's phone
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OtpRequest' } } } }
+      responses:
+        '200': { description: Code sent, content: { application/json: { schema: { $ref: '#/components/schemas/OtpIssued' } } } }
+        '429': { description: Too many codes for this number }
+  /api/enroll/verify-otp:
+    post:
+      operationId: verifyEnrolmentOtp
+      security: []
+      tags: [Enrolment]
+      summary: Verify the code and get a 15-minute enrolment token
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [phone, otp], properties: { phone: { $ref: '#/components/schemas/Phone' }, otp: { type: string } } } } }
+      responses:
+        '200':
+          description: Verified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verified: { type: boolean }
+                  enrolment_token: { type: string }
+                  existing_customer: { type: boolean }
+                  has_active_wallet: { type: boolean }
+        '400': { description: Wrong or expired code }
+  /api/enroll/topup-order:
+    post:
+      operationId: createEnrolmentTopupOrder
+      tags: [Enrolment, PayPal]
+      summary: Create the PayPal order for the first top-up ($10–$200)
+      security: [{ enrolmentToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [amount], properties: { amount: { $ref: '#/components/schemas/Amount' } } } } } }
+      responses:
+        '200': { description: Order created, content: { application/json: { schema: { $ref: '#/components/schemas/PayPalOrder' } } } }
+  /api/enroll/create-wallet:
+    post:
+      operationId: createWallet
+      tags: [Enrolment, PayPal]
+      summary: Create the wallet and capture the approved PayPal order
+      description: |
+        New customers send their chosen `id_method` and the matching scans. Existing
+        customers send only their current PIN and the order. The PayPal order is captured
+        only after every other check passes, and refunded if the wallet can't be written.
+      security: [{ enrolmentToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paypal_order_id, wallet_pin]
+              properties:
+                paypal_order_id: { type: string }
+                wallet_pin: { type: string, pattern: '^\d{4,6}$' }
+                id_method: { type: string, enum: [fingerprint, face, both] }
+                fingerprint_embedding: { $ref: '#/components/schemas/Embedding' }
+                distress_fingerprint_embedding: { $ref: '#/components/schemas/Embedding' }
+                face_embedding: { $ref: '#/components/schemas/Embedding' }
+                liveness_passed: { type: boolean }
+                emergency_contact: { $ref: '#/components/schemas/Phone' }
+      responses:
+        '200': { description: Wallet ready, content: { application/json: { schema: { $ref: '#/components/schemas/WalletCreated' } } } }
+        '401': { description: Wrong PIN (existing customer) }
+        '409': { description: 'Biometric already registered, order already used, or an active wallet exists' }
+  /api/enroll/sign-in:
+    post:
+      operationId: signInCustomer
+      tags: [Enrolment]
+      summary: Reopen an active wallet with the PIN
+      security: [{ enrolmentToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [pin], properties: { pin: { type: string } } } } } }
+      responses:
+        '200': { description: Signed in, content: { application/json: { schema: { $ref: '#/components/schemas/WalletCreated' } } } }
+        '423': { description: PIN locked }
+
+  /api/merchant/request-otp:
+    post:
+      operationId: requestMerchantOtp
+      security: []
+      tags: [Merchant]
+      summary: Send a sign-in code to the shop's phone
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OtpRequest' } } } }
+      responses:
+        '200': { description: Code sent, content: { application/json: { schema: { $ref: '#/components/schemas/OtpIssued' } } } }
+  /api/merchant/verify-otp:
+    post:
+      operationId: verifyMerchantOtp
+      security: []
+      tags: [Merchant]
+      summary: Sign in (new numbers also register a shop name and PayPal payout email)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, otp]
+              properties:
+                phone: { $ref: '#/components/schemas/Phone' }
+                otp: { type: string }
+                display_name: { type: string }
+                paypal_email: { type: string, format: email }
+      responses:
+        '200': { description: Merchant token, content: { application/json: { schema: { type: object, properties: { token: { type: string }, merchant: { type: object } } } } } }
+        '409': { description: 'registration_required: send display_name and paypal_email (the code stays valid)' }
+  /api/merchant/me:
+    get:
+      operationId: getMerchant
+      tags: [Merchant]
+      summary: The signed-in merchant and their balance
+      security: [{ merchantToken: [] }]
+      responses: { '200': { description: Profile and balance } }
+  /api/merchant/dashboard:
+    get:
+      operationId: getMerchantDashboard
+      tags: [Merchant]
+      summary: Sales, payouts, hourly series and anomaly flags (customers masked; no distress data)
+      security: [{ merchantToken: [] }]
+      responses: { '200': { description: Dashboard data } }
+  /api/merchant/cashout:
+    post:
+      operationId: cashOut
+      tags: [Merchant, PayPal]
+      summary: Pay the available balance out to the merchant's PayPal account now
+      security: [{ merchantToken: [] }]
+      responses:
+        '200': { description: Payout started }
+        '400': { description: Nothing to cash out, content: { application/json: { schema: { type: object, properties: { balance: { $ref: '#/components/schemas/Balance' } } } } } }
+  /api/merchant/refunds:
+    post:
+      operationId: refundPayment
+      tags: [Merchant]
+      summary: Refund one of the merchant's payments back to the customer's wallet
+      security: [{ merchantToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [transaction_id], properties: { transaction_id: { type: string, format: uuid }, reason: { type: string } } } } } }
+      responses:
+        '200': { description: Refunded }
+        '409': { description: "Already refunded, or the customer's wallet is closed" }
+
+  /api/payment/identify:
+    post:
+      operationId: identifyCustomer
+      tags: [Terminal]
+      summary: Identify the customer by a scan (1:N), or add their second scan (1:1)
+      security: [{ merchantToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method, embedding]
+              properties:
+                method: { type: string, enum: [fingerprint, face] }
+                embedding: { $ref: '#/components/schemas/Embedding' }
+                session_token: { type: string, description: For the second scan of a "both" customer }
+      responses:
+        '200': { description: Pay session, content: { application/json: { schema: { $ref: '#/components/schemas/PaySession' } } } }
+        '404': { description: Not recognised / no active wallet }
+        '422': { description: Ambiguous scan — rescan }
+  /api/payment/pay:
+    post:
+      operationId: pay
+      tags: [Terminal]
+      summary: Amount + customer PIN → payment (idempotent per session)
+      security: [{ merchantToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_token, amount, pin]
+              properties:
+                session_token: { type: string }
+                amount: { $ref: '#/components/schemas/Amount' }
+                pin: { type: string }
+                gps_lat: { type: number }
+                gps_lng: { type: number }
+      responses:
+        '200': { description: Paid, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResult' } } } }
+        '400': { description: Amount over the limit or insufficient balance (customer stays identified) }
+        '401': { description: Wrong PIN (attempts_left) }
+        '403': { description: Declined by the risk check }
+        '410': { description: 'Session ended (used, cancelled or expired)' }
+        '423': { description: PIN locked }
+  /api/payment/cancel:
+    post:
+      operationId: cancelPaySession
+      tags: [Terminal]
+      summary: End a customer's session (customer signed out)
+      security: [{ merchantToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { session_token: { type: string } } } } } }
+      responses: { '200': { description: Cancelled } }
+
+  /api/wallet/{wallet_id}:
+    get:
+      operationId: getWallet
+      tags: [Wallet]
+      summary: Wallet balance, limits and history
+      security: [{ customerToken: [] }]
+      parameters: [{ name: wallet_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: 'Wallet, limits and history' } }
+  /api/wallet/topup-order:
+    post:
+      operationId: createTopupOrder
+      tags: [Wallet, PayPal]
+      summary: Create a PayPal order to add money (wallet holds at most $200)
+      security: [{ customerToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [wallet_id, amount], properties: { wallet_id: { type: string }, amount: { $ref: '#/components/schemas/Amount' } } } } } }
+      responses: { '200': { description: Order created, content: { application/json: { schema: { $ref: '#/components/schemas/PayPalOrder' } } } } }
+  /api/wallet/topup-capture:
+    post:
+      operationId: captureTopup
+      tags: [Wallet, PayPal]
+      summary: Capture the approved order and credit the wallet
+      security: [{ customerToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [wallet_id, paypal_order_id], properties: { wallet_id: { type: string }, paypal_order_id: { type: string } } } } } }
+      responses: { '200': { description: Credited } }
+  /api/wallet/send:
+    post:
+      operationId: sendMoney
+      tags: [Wallet, PayPal]
+      summary: Send money to someone's PayPal email (PIN; paid by PayPal Payouts)
+      security: [{ customerToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wallet_id, to_email, amount, pin, idempotency_key]
+              properties:
+                wallet_id: { type: string }
+                to_email: { type: string, format: email }
+                amount: { $ref: '#/components/schemas/Amount' }
+                pin: { type: string }
+                idempotency_key: { type: string, minLength: 8, maxLength: 64 }
+      responses: { '200': { description: Sent } }
+  /api/wallet/refund:
+    post:
+      operationId: closeWallet
+      tags: [Wallet, PayPal]
+      summary: Close the wallet and refund the balance to the PayPal captures that funded it
+      security: [{ customerToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [wallet_id], properties: { wallet_id: { type: string } } } } } }
+      responses:
+        '200': { description: Closed and refunded }
+        '502': { description: A PayPal refund failed; the wallet stays frozen and the call can be retried }
+  /api/wallet/extend:
+    post:
+      operationId: extendWallet
+      tags: [Wallet]
+      summary: Keep the wallet open another 72 hours
+      security: [{ customerToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { wallet_id: { type: string } } } } } }
+      responses: { '200': { description: Extended by 72 hours (up to 7 days total) } }
+  /api/wallet/reissue-biometric:
+    post:
+      operationId: reissueBiometric
+      tags: [Wallet]
+      summary: Replace a biometric template (needs the PIN and a scan that still matches)
+      security: [{ customerToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wallet_id, embedding, pin]
+              properties:
+                wallet_id: { type: string, format: uuid }
+                template_type: { type: string, enum: [fingerprint, face], default: fingerprint }
+                embedding: { type: array, items: { type: number } }
+                pin: { type: string }
+      responses:
+        '200': { description: The old template is revoked and the new one stored }
+        '401': { description: Wrong PIN, or the scan does not match the current template }
+        '409': { description: The scan is too close to another customer }
+  /api/wallet/sos:
+    post:
+      operationId: sendSos
+      tags: [Wallet]
+      summary: Panic button (SMS + Zapier webhook to the emergency contact)
+      security: [{ customerToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { wallet_id: { type: string }, gps_lat: { type: number }, gps_lng: { type: number } } } } } }
+      responses: { '200': { description: SOS sent } }
+
+  /api/paypal/config:
+    get:
+      operationId: getPayPalConfig
+      security: []
+      tags: [PayPal]
+      summary: Browser-safe JS SDK v6 settings (client id only)
+      responses:
+        '200':
+          description: Config
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: { type: string, enum: [paypal-sandbox, paypal-live, simulated] }
+                  enabled: { type: boolean }
+                  client_id: { type: [string, 'null'] }
+                  sdk_url: { type: string }
+                  currency: { type: string }
+  /api/paypal/webhook:
+    post:
+      operationId: receivePayPalWebhook
+      security: []
+      tags: [PayPal]
+      summary: PayPal webhook receiver (signature verified with PAYPAL_WEBHOOK_ID)
+      description: Handles PAYMENT.PAYOUTS-ITEM.*, CUSTOMER.DISPUTE.CREATED and INVOICING.INVOICE.PAID.
+      responses:
+        '200': { description: Accepted }
+        '400': { description: Signature verification failed }
+        '503': { description: Webhooks not configured }
+
+  /api/assistant/chat:
+    post:
+      operationId: askAssistant
+      tags: [Assistant]
+      summary: Ask the merchant assistant (it can only propose refunds/cash-outs)
+      security: [{ merchantToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messages]
+              properties:
+                messages:
+                  type: array
+                  items: { type: object, properties: { role: { type: string, enum: [user, assistant] }, text: { type: string } } }
+      responses:
+        '200':
+          description: Reply
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reply: { type: string }
+                  actions: { type: array, items: { type: object }, description: 'Proposals the merchant confirms in the app (refund, cashout), invoice links and QR codes' }
+                  tools_used: { type: array, items: { type: string } }
+                  model: { type: string }
+  /api/assistant/status:
+    get:
+      operationId: assistantStatus
+      tags: [Assistant]
+      summary: Whether the assistant is configured, and which model answers
+      security: [{ merchantToken: [] }]
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { type: object, properties: { enabled: { type: boolean }, model: { type: string } } } } }
+  /api/voice/confirm:
+    post:
+      operationId: voiceConfirm
+      tags: [Terminal]
+      summary: The sentence the terminal speaks after a payment
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { amount: { type: string }, merchant_name: { type: string }, payer_name: { type: string }, transaction_id: { type: string }, lang: { type: string, enum: [en, es] } } }
+      responses:
+        '200': { description: Text to speak, content: { application/json: { schema: { type: object, properties: { text: { type: string } } } } } }
+  /api/family/add-delegate:
+    post:
+      operationId: addDelegate
+      tags: [Family]
+      summary: Add a family member who can pay from this wallet up to a cap
+      security: [{ customerToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parent_wallet_id, owner_pin, delegate_name, delegate_fingerprint_embedding, delegate_pin, spending_cap]
+              properties:
+                parent_wallet_id: { type: string, format: uuid }
+                owner_pin: { type: string }
+                delegate_name: { type: string }
+                delegate_fingerprint_embedding: { type: array, items: { type: number } }
+                delegate_pin: { type: string }
+                spending_cap: { type: string, example: '20.00', description: Dollars }
+                per_delegate_expiry: { type: string, format: date-time, description: Optional; must be in the future }
+      responses:
+        '200': { description: Delegate added }
+        '400': { description: Invalid cap, expiry, PIN or scan }
+        '409': { description: The finger is already registered }
+  /api/family/delegates/{parent_wallet_id}:
+    get:
+      operationId: listDelegates
+      tags: [Family]
+      summary: Active family members on this wallet
+      security: [{ customerToken: [] }]
+      parameters:
+        - { name: parent_wallet_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Delegates with cap and amount spent (cents) }
+  /api/demo:
+    get:
+      operationId: demoStatus
+      tags: [Demo]
+      summary: Whether one-tap demo shops are available
+      security: []
+      responses:
+        '200': { description: Status, content: { application/json: { schema: { type: object, properties: { enabled: { type: boolean } } } } } }
+  /api/demo/start:
+    post:
+      operationId: startDemo
+      tags: [Demo]
+      summary: A fresh demo shop (with a morning of sales) and a demo customer holding $50
+      description: |
+        All demo money is simulated, even when PayPal is configured. Returns a merchant
+        session, and a customer session with the customer's PIN and an enrolled demo scan
+        vector the app can use instead of a camera. Limited per visitor per hour.
+      security: []
+      responses:
+        '200':
+          description: Demo shop and customer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  merchant:
+                    type: object
+                    properties:
+                      token: { type: string }
+                      merchant: { type: object, properties: { id: { type: string }, display_name: { type: string }, paypal_email: { type: string }, is_demo: { type: boolean } } }
+                  customer:
+                    type: object
+                    properties:
+                      token: { type: string }
+                      wallet_id: { type: string }
+                      expiry: { type: string, format: date-time }
+                      label: { type: string, example: Customer ••1234 }
+                      pin: { type: string }
+                      scan: { type: array, items: { type: number } }
+        '404': { description: Demo mode is off }
+        '429': { description: Too many demo shops from this visitor }

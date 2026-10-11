@@ -1,48 +1,70 @@
-// API client for the PulsePay-SBI backend (fingerprint-primary).
-// The web demo uses the webcam as a stand-in for the AePS fingerprint scanner;
-// captured frames go to the India-resident CV service, which returns a vector.
+// API client for the PulsePay backend.
+// The web demo uses the device camera as a stand-in for a fingerprint sensor;
+// captured frames go to the CV service, which returns a vector (no image is stored).
 
 export const API_URL = (import.meta as any).env?.VITE_API_URL || "http://localhost:5000";
 export const CV_URL = (import.meta as any).env?.VITE_CV_URL || "http://localhost:8000";
 
-// ---- session (the customer's wallet token) --------------------------------
+export type IdMethod = "fingerprint" | "face" | "both";
+
+// ---- customer session (the wallet owner's own phone) ----------------------
 type Session = { token: string; walletId: string; expiry?: string };
 const SKEY = "pulsepay_session";
 
-export function saveSession(s: Session) {
-  localStorage.setItem(SKEY, JSON.stringify(s));
-}
-export function getSession(): Session | null {
+function readJson<T>(key: string): T | null {
   try {
-    const raw = localStorage.getItem(SKEY);
-    if (!raw) return null;
-    const s = JSON.parse(raw) as Session;
-    if (s.expiry && new Date(s.expiry) < new Date()) { clearSession(); return null; }
-    return s;
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
   } catch { return null; }
 }
-export function clearSession() { localStorage.removeItem(SKEY); }
-
-// ---- merchant/terminal token (demo) ---------------------------------------
-let terminalToken: string | null = null;
-export async function getTerminalToken(merchantUpi = "kirana@upi"): Promise<string> {
-  if (terminalToken) return terminalToken;
-  const r = await fetch(`${API_URL}/api/merchant/session`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ merchant_upi: merchantUpi }),
-  });
-  const d = await r.json();
-  terminalToken = d.token;
-  return terminalToken!;
+function writeJson(key: string, value: unknown) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
+}
+function remove(key: string) {
+  try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
 }
 
+export function saveSession(s: Session) { writeJson(SKEY, s); }
+export function getSession(): Session | null {
+  const s = readJson<Session>(SKEY);
+  if (s?.expiry && new Date(s.expiry) < new Date()) { clearSession(); return null; }
+  return s;
+}
+export function clearSession() { remove(SKEY); }
+
+// ---- merchant session (the shop's phone) ----------------------------------
+export type Merchant = { id: string; display_name: string; paypal_email: string; is_demo?: boolean };
+type MerchantSession = { token: string; merchant: Merchant };
+const MKEY = "pulsepay_merchant";
+
+export function saveMerchantSession(s: MerchantSession) { writeJson(MKEY, s); }
+export function getMerchantSession(): MerchantSession | null { return readJson<MerchantSession>(MKEY); }
+export function clearMerchantSession() { remove(MKEY); }
+
+// ---- "Try the demo" (server DEMO_MODE) ------------------------------------
+// The demo customer's scan vector and PIN, so the terminal can stand in for the
+// scanner on devices without a camera.
+export type DemoCustomer = { label: string; pin: string; scan: number[] };
+const DKEY = "pulsepay_demo_customer";
+
+export function saveDemoCustomer(d: DemoCustomer) { writeJson(DKEY, d); }
+export function getDemoCustomer(): DemoCustomer | null { return readJson<DemoCustomer>(DKEY); }
+export function clearDemoCustomer() { remove(DKEY); }
+
 // ---- low-level fetch ------------------------------------------------------
-async function req(path: string, opts: RequestInit = {}, token?: string) {
+export type ApiResult = { ok: boolean; status: number; data: any };
+
+async function req(path: string, opts: RequestInit = {}, token?: string): Promise<ApiResult> {
   const headers: Record<string, string> = { "Content-Type": "application/json", ...(opts.headers as any) };
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  const r = await fetch(`${API_URL}${path}`, { ...opts, headers });
+  let r: Response;
+  try {
+    r = await fetch(`${API_URL}${path}`, { ...opts, headers });
+  } catch {
+    return { ok: false, status: 0, data: { error: "Can't reach the PulsePay server. Is the API running on port 5000?" } };
+  }
   let data: any = {};
-  try { data = await r.json(); } catch { /* empty */ }
+  try { data = await r.json(); } catch { /* empty body */ }
   return { ok: r.ok, status: r.status, data };
 }
 
@@ -51,14 +73,22 @@ export const api = {
   post: (path: string, body: any, token?: string) => req(path, { method: "POST", body: JSON.stringify(body) }, token),
 };
 
-// ---- biometric embedding via the India-resident CV service ----------------
-// endpoint: 'fingerprint' (primary / distress) or 'face' (step-up)
-export async function embed(endpoint: "fingerprint" | "face", blob: Blob): Promise<{ embedding: number[]; liveness_passed?: boolean; pad_score?: number; error?: string }> {
+// ---- biometric embedding via the CV service --------------------------------
+export type EmbedResult = { embedding: number[]; liveness_passed?: boolean; pad_score?: number; quality?: number; error?: string };
+
+export async function embed(endpoint: "fingerprint" | "face", blob: Blob): Promise<EmbedResult> {
   const fd = new FormData();
   fd.append("image", blob, "capture.jpg");
-  const r = await fetch(`${CV_URL}/embed-${endpoint}`, { method: "POST", body: fd });
-  return r.json();
+  try {
+    const r = await fetch(`${CV_URL}/embed-${endpoint}`, { method: "POST", body: fd });
+    return await r.json();
+  } catch {
+    return { embedding: [], error: "Can't reach the scanner service on port 8000." };
+  }
 }
 
-export function rupeesToPaise(r: number) { return Math.round(r * 100); }
-export function paiseToRupees(p: number) { return Math.round(Number(p) / 100); }
+export function newIdempotencyKey() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}

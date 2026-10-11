@@ -1,16 +1,5 @@
-let client = null;
-
-try {
-    const twilio = require('twilio');
-    client = twilio(
-        process.env.TWILIO_ACCOUNT_SID || 'test_sid',
-        process.env.TWILIO_AUTH_TOKEN || 'test_token'
-    );
-} catch (err) {
-    console.warn('Twilio client init skipped (test mode)');
-}
-
-const TWILIO_PHONE = process.env.TWILIO_PHONE_NUMBER || '+1234567890';
+// Demo SMS transport: logs instead of sending. Production: a real SMS gateway (e.g. Twilio).
+const TWILIO_PHONE = process.env.TWILIO_PHONE_NUMBER || '+15550000000';
 
 async function sendSMS(to, message) {
     await new Promise(r => setTimeout(r, 300));
@@ -28,9 +17,12 @@ async function sendSMS(to, message) {
     };
 }
 
-async function sendSOS(emergencyContact, userName, gpsLat, gpsLng) {
-    const googleMapsLink = `https://www.google.com/maps?q=${gpsLat},${gpsLng}`;
-    const message = `PULSEPAY DISTRESS ALERT\n\nUser ${userName} triggered emergency payment mode.\n\nLocation: ${googleMapsLink}\n\nThis is an automated alert. Please check on them immediately.`;
+async function sendSOS(emergencyContact, userName, gpsLat, gpsLng, place, reason = 'used their distress finger to pay') {
+    const hasGps = gpsLat != null && gpsLng != null && !(Number(gpsLat) === 0 && Number(gpsLng) === 0);
+    const mapLink = hasGps ? `https://www.google.com/maps?q=${gpsLat},${gpsLng}` : null;
+    const where = [place ? `At: ${place}` : null, mapLink ? `Location: ${mapLink}` : 'Location: not available']
+        .filter(Boolean).join('\n');
+    const message = `PULSEPAY DISTRESS ALERT\n\n${userName} ${reason}.\n\n${where}\n\nThis is an automated alert. Please check on them immediately.`;
 
     await new Promise(r => setTimeout(r, 300));
 
@@ -43,7 +35,7 @@ async function sendSOS(emergencyContact, userName, gpsLat, gpsLng) {
         from: TWILIO_PHONE,
         body: message,
         dateCreated: new Date().toISOString(),
-        location: googleMapsLink
+        location: mapLink,
     };
 }
 

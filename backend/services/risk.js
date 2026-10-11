@@ -1,73 +1,83 @@
 /**
- * Escalate-only risk engine (ARCHITECTURE §4.4).
+ * Escalate-only risk check.
  *
- * Authentication model (fingerprint-primary):
- *   - Base:    FINGERPRINT + PIN           (everyday amounts)
- *   - Step-up: FINGERPRINT + FACE          (above a configured amount limit)
- *   - Highest: FINGERPRINT + FACE + OTP    (high value / anomalous)
+ * Every payment already needs the customer's chosen biometric(s) + PIN, inside
+ * hard wallet limits (balance cap, per-payment cap, 72h expiry). The customer's
+ * phone may be at home, so there is no OTP to step up to. The advisor can therefore
+ * only do one thing: escalate an allowed payment to DECLINED.
  *
- * Fingerprint is the primary inherence factor (matches SBI's AePS device base); the
- * agentic risk score may only RAISE the tier (require face, then OTP), never lower it
- * below the deterministic RBI-AFA floor. A poisoned/hallucinated score cannot weaken
- * auth:  final_tier = max(static_floor, ai_recommendation).
+ *   final = strictest(floor, advice)      floor is always 'allow' within limits
  *
- * Cold-start (no history) returns the floor — auth never blocks on the risk engine
- * (no bootstrap loop); the in-path scorer never trains online on its own outcomes.
+ * A poisoned or hallucinated advisor can block a payment but can never weaken
+ * authentication. If Jev does not answer, a local heuristic produces a score for
+ * display and the floor stands (auth never blocks on the advisor).
  */
 
-const TIERS = ['fingerprint_pin', 'fingerprint_face', 'fingerprint_face_otp'];
+const DECISIONS = ['allow', 'decline'];
 
-// Provisional thresholds (paise). Calibrate to RBI/NPCI small-PPI circulars.
-const FACE_FLOOR = Number(process.env.TIER_FACE_PAISE || 50000);   // > Rs 500  -> add FACE
-const OTP_FLOOR = Number(process.env.TIER_OTP_PAISE || 150000);    // > Rs 1500 -> add OTP
-
-function rank(tier) {
-    const i = TIERS.indexOf(tier);
+function rank(decision) {
+    const i = DECISIONS.indexOf(decision);
     return i === -1 ? 0 : i;
 }
-function maxTier(a, b) {
+function strictest(a, b) {
     return rank(a) >= rank(b) ? a : b;
 }
-
-/** Deterministic statutory floor. Minimum is always two factors (fingerprint + PIN). */
-function staticFloor(amountPaise) {
-    if (amountPaise >= OTP_FLOOR) return 'fingerprint_face_otp';
-    if (amountPaise >= FACE_FLOOR) return 'fingerprint_face';
-    return 'fingerprint_pin';
+function knownDecision(d) {
+    return DECISIONS.includes(d) ? d : null;
 }
 
-/** Advisory score (escalate-only). Real impl calls the India-resident risk model. */
-function advise({ amountPaise, hour, spendingHistory }) {
-    let recommend = 'fingerprint_pin';
-    if (hour >= 22 || hour < 5) recommend = maxTier(recommend, 'fingerprint_face'); // late night
-    if (Array.isArray(spendingHistory) && spendingHistory.length > 0) {
+/** Offline heuristic: a 0–100 score for display only. Never declines. */
+function localScore({ amountCents, hour, spendingHistory }) {
+    let score = 10;
+    if (hour >= 22 || hour < 5) score += 25;
+    if (spendingHistory.length > 0) {
         const avg = spendingHistory.reduce((a, b) => a + b, 0) / spendingHistory.length;
-        if (avg > 0 && amountPaise > avg * 5) recommend = maxTier(recommend, 'fingerprint_face_otp');
+        if (avg > 0 && amountCents > avg * 5) score += 50;
     }
-    return recommend;
+    return Math.min(100, score);
 }
 
-/** Decide the final tier. Escalate-only: max(floor, advice). */
-function decideTier({ amountPaise, now, spendingHistory }) {
-    const floor = staticFloor(amountPaise);
-    let recommended = floor;
+async function assess({ amountCents, now, spendingHistory }) {
+    const floor = 'allow';
+    const history = Array.isArray(spendingHistory) ? spendingHistory : [];
+    const hour = (now || new Date()).getHours();
+
+    let advice = floor;
+    let source = 'floor';
+    let jev = null;
+    let fallbackReason = null;
+    let fraudScore = null;
     try {
-        recommended = advise({
-            amountPaise,
-            hour: (now || new Date()).getHours(),
-            spendingHistory: spendingHistory || [],
+        jev = await require('./jev').advise({
+            amount_usd: amountCents / 100,
+            hour_of_day: hour,
+            is_late_night: hour >= 22 || hour < 5,
+            recent_amounts_usd: history.map((c) => c / 100),
         });
-    } catch (_) {
-        recommended = floor; // graceful degradation to deterministic policy
+        const d = knownDecision(jev.choice);
+        if (d) {
+            advice = d;
+            source = 'jev';
+        }
+        fraudScore = jev.fraud_risk_score;
+    } catch (err) {
+        source = 'fallback';
+        fallbackReason = err && err.message ? err.message : 'jev unavailable';
+        fraudScore = localScore({ amountCents, hour, spendingHistory: history });
+        jev = null;
     }
-    const tier = maxTier(floor, recommended);
+
+    const decision = strictest(floor, advice);
     return {
-        tier,
+        decision,
         floor,
-        recommended,
-        requires_face: tier === 'fingerprint_face' || tier === 'fingerprint_face_otp',
-        requires_otp: tier === 'fingerprint_face_otp',
+        advice,
+        source,
+        fallback_reason: fallbackReason,
+        model: jev?.model || null,
+        fraud_risk_score: fraudScore,
+        choice_confidence: jev?.choice_confidence ?? null,
     };
 }
 
-module.exports = { decideTier, staticFloor, TIERS };
+module.exports = { assess, strictest, localScore };

@@ -1,0 +1,94 @@
+# Render Blueprint: deploys the whole PulsePay stack.
+#   Dashboard -> New -> Blueprint -> pick this repo. Fill the `sync: false` secrets
+#   when Render asks. After the first deploy, set VITE_API_URL / VITE_CV_URL on the
+#   frontend to the backend / CV service URLs and redeploy it (static sites bake env
+#   in at build time), and add the frontend URL to the backend's CORS_ORIGINS.
+#
+# A public backend URL is also what PayPal webhooks need:
+#   https://<backend>.onrender.com/api/paypal/webhook   (set PAYPAL_WEBHOOK_ID after creating it)
+
+databases:
+  - name: pulsepay-db
+    plan: basic-256mb
+    databaseName: pulsepay
+    user: pulsepay
+
+services:
+  - type: web
+    name: pulsepay-backend
+    runtime: node
+    plan: starter
+    buildCommand: cd backend && npm ci
+    startCommand: node backend/scripts/migrate.js && node backend/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase: { name: pulsepay-db, property: connectionString }
+      - key: JWT_SECRET
+        generateValue: true
+      - key: KMS_DATA_KEY          # 64 hex chars: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+        sync: false
+      - key: CORS_ORIGINS          # e.g. https://pulsepay-frontend.onrender.com
+        sync: false
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_ENVIRONMENT
+        value: sandbox
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: PAYOUT_MODE          # manual: merchants tap "Cash out" (sales stay refundable until then)
+        value: manual
+      - key: TRUST_PROXY          # Render's proxy: rate limits see the visitor, not the proxy
+        value: "1"
+      - key: AWS_BEARER_TOKEN_BEDROCK
+        sync: false
+      - key: BEDROCK_REGION
+        value: us-east-1
+      - key: BEDROCK_MODEL_ID
+        value: zai.glm-5.3
+      - key: ZAPIER_WEBHOOK_URL
+        sync: false
+      - key: ELASTIC_URL
+        sync: false
+      - key: ELASTIC_API_KEY
+        sync: false
+      # Demo shortcuts for judges: codes shown in the app and the one-tap "Try the demo"
+      # shop. Allowed on PayPal sandbox; the server refuses both with live PayPal.
+      - key: DEMO_SHOW_OTP
+        value: "true"
+      - key: DEMO_MODE
+        value: "true"
+
+  - type: web
+    name: pulsepay-cv
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./cv-service/Dockerfile
+    dockerContext: ./cv-service
+    healthCheckPath: /
+    envVars:
+      - key: CORS_ORIGINS
+        sync: false
+
+  - type: web
+    name: pulsepay-frontend
+    runtime: static
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: frontend/dist
+    headers:
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin-allow-popups   # PayPal JS SDK v6 checkout popup
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_CV_URL
+        sync: false

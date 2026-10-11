@@ -1,7 +1,7 @@
 /**
- * Biometric template protection + matching (ARCHITECTURE §4.2).
+ * Biometric template protection + matching.
  *
- * Fixes the core flaw of the Amazon build: it hashed the embedding (SHA3-256) and
+ * Fixes the core flaw of the earlier build: it hashed the embedding (SHA3-256) and
  * did an EXACT-MATCH SQL lookup, which can never match two captures of the same
  * face (hash avalanche). Here we:
  *   1. keep the embedding as a VECTOR and match by cosine similarity >= threshold;
@@ -14,12 +14,23 @@
  *
  * The identifier (wallet UUID) is separated from the authenticator (this template):
  * matching returns WHICH subject matched; it is never used as a primary key.
+ *
+ * Demo caveat: the CV service's vectors come from a webcam frame, not a certified
+ * fingerprint sensor or face model. FAR/FRR are unmeasured.
  */
 const crypto = require('crypto');
 const kms = require('./kms');
 
-// Calibrated against FAR/FRR targets in production; provisional default here.
-const MATCH_THRESHOLD = Number(process.env.FACE_MATCH_THRESHOLD || 0.86);
+// Calibrated against FAR/FRR targets in production; provisional defaults here.
+const MATCH_THRESHOLD = Number(process.env.BIOMETRIC_MATCH_THRESHOLD || process.env.FACE_MATCH_THRESHOLD || 0.86);
+// 1:N decisions must be unambiguous: the best match has to beat the runner-up from
+// any OTHER identity or purpose by this much, otherwise the scan is rejected and
+// retaken. This is what stops a payment finger from tripping the distress finger
+// (or another customer) when two templates score almost the same.
+const MATCH_MARGIN = Number(process.env.BIOMETRIC_MATCH_MARGIN || 0.03);
+
+const MIN_DIM = 64;
+const MAX_DIM = 4096;
 
 // ---- cancelable transform (orthogonal => cosine-preserving) ----------------
 
@@ -88,6 +99,17 @@ function bufferToVec(buf) {
 
 // ---- public API ------------------------------------------------------------
 
+/** A usable embedding: a plain array of 64..4096 finite numbers that is not all zeros. */
+function isEmbedding(v) {
+    if (!Array.isArray(v) || v.length < MIN_DIM || v.length > MAX_DIM) return false;
+    let nonZero = false;
+    for (const x of v) {
+        if (typeof x !== 'number' || !Number.isFinite(x)) return false;
+        if (x !== 0) nonZero = true;
+    }
+    return nonZero;
+}
+
 /**
  * Protect a raw embedding for storage: cancelable-transform then envelope-encrypt.
  * Returns the row fields for biometric_templates.
@@ -108,7 +130,7 @@ function protect(embedding) {
 /**
  * Score a probe embedding against ONE stored template row.
  * Decrypts inside this "enclave", transforms the probe with the row's salt,
- * and returns the cosine similarity (0..1-ish).
+ * and returns the cosine similarity.
  */
 function scoreAgainst(probeEmbedding, templateRow) {
     const storedTransformed = bufferToVec(
@@ -119,24 +141,70 @@ function scoreAgainst(probeEmbedding, templateRow) {
 }
 
 /**
+ * Score against a row, or null if the row can't be decrypted (wrong/rotated key,
+ * corrupted ciphertext). One unreadable template must not take down matching for
+ * every other customer; it is logged and treated as a non-match, so only its own
+ * owner is locked out until it is re-enrolled.
+ */
+function safeScore(probeEmbedding, row) {
+    try {
+        return scoreAgainst(probeEmbedding, row);
+    } catch (e) {
+        console.error(`biometric template ${row.id} could not be decrypted (${e.message}); skipped`);
+        return null;
+    }
+}
+
+/** Raw cosine between two unprotected embeddings (enrolment-time checks only). */
+function similarity(a, b) {
+    return cosine(a, b);
+}
+
+/**
  * 1:N identification over a set of active templates (small-N is fine for a demo;
- * production uses an ANN index inside the enclave). Returns the best match above
- * threshold, or null. Confidence is the REAL similarity score (0..100), never a
- * client value and never a hash-modulo.
+ * production uses an ANN index inside the enclave).
+ *
+ * Returns one of:
+ *   null                         — nothing above threshold
+ *   { ambiguous: true }          — best and runner-up (different subject or purpose)
+ *                                  are within MATCH_MARGIN; rescan
+ *   { subject_id, template_id, purpose, similarity, confidence_score }
  */
 function identify(probeEmbedding, templateRows) {
-    let best = null;
+    // Best score per (subject, purpose) group, so two templates of the same finger
+    // never count as ambiguity, but payment-vs-distress finger of one person does.
+    const groups = new Map();
     for (const row of templateRows) {
-        const sim = scoreAgainst(probeEmbedding, row);
-        if (!best || sim > best.similarity) best = { row, similarity: sim };
+        const sim = safeScore(probeEmbedding, row);
+        if (sim === null) continue;
+        const key = `${row.subject_id}:${row.purpose}`;
+        const cur = groups.get(key);
+        if (!cur || sim > cur.similarity) groups.set(key, { row, similarity: sim });
     }
+    const ranked = [...groups.values()].sort((a, b) => b.similarity - a.similarity);
+    const best = ranked[0];
     if (!best || best.similarity < MATCH_THRESHOLD) return null;
+    const runnerUp = ranked[1];
+    if (runnerUp && best.similarity - runnerUp.similarity < MATCH_MARGIN) return { ambiguous: true };
     return {
         subject_id: best.row.subject_id,
         template_id: best.row.id,
+        purpose: best.row.purpose,
         similarity: best.similarity,
         confidence_score: Math.round(Math.min(100, best.similarity * 100)),
     };
 }
 
-module.exports = { protect, scoreAgainst, identify, cosine, MATCH_THRESHOLD };
+/**
+ * True if the probe would collide with any of these templates in a future 1:N
+ * search (within MATCH_MARGIN of the threshold). Used at enrolment so two
+ * identities can never be confused with each other.
+ */
+function collides(probeEmbedding, templateRows) {
+    return templateRows.some((row) => (safeScore(probeEmbedding, row) ?? -1) >= MATCH_THRESHOLD - MATCH_MARGIN);
+}
+
+module.exports = {
+    isEmbedding, protect, scoreAgainst, safeScore, similarity, identify, collides,
+    MATCH_THRESHOLD, MATCH_MARGIN,
+};

@@ -1,7 +1,7 @@
 /**
  * KMS / envelope-encryption service.
  *
- * Stand-in for the India-resident HA HSM/KMS cluster (ARCHITECTURE §4.2, §10).
+ * Stand-in for a managed HSM/KMS (e.g. AWS KMS or Cloud HSM).
  * In production the data key never leaves the HSM and decryption happens inside a
  * secure enclave. Here we use AES-256-GCM with a data key sourced from the
  * KMS_DATA_KEY env var (which would itself be delivered by Vault/KMS, never hardcoded).
@@ -51,4 +51,4 @@ function assertAvailable() {
     loadDataKey();
 }
 
-module.exports = { encrypt, decrypt, assertAvailable, KEY_REF };
+module.exports = { encrypt, decrypt, assertAvailable };

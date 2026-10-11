@@ -1,112 +1,87 @@
 # PulsePay MVP scope & honesty matrix
 
-This document freezes what **this repo** implements today versus what remains partner- or hardware-blocked. Architecture choices here are **not** evidence of legal compliance, certified biometrics, or production readiness.
+What this repository implements today, what was tested against real services, and what is simulated. Nothing here is a claim of production readiness, certified biometrics, or regulatory approval.
 
 ---
 
-## 1. MVP acceptance scope (frozen)
+## 1. Acceptance flow
 
-| In scope (demo) | Deferred |
-|---|---|
-| Enrolment flow (OTP → biometrics → PIN → fund wallet) | Family / delegate spend (code may exist; **not** MVP acceptance) |
-| Pay / Send (authenticate → execute → balance + transactions update) | Real SBI CBS / NPCI UPI switch / UPI 123Pay |
-| Request (QR + copyable code + share/clipboard) | Real UIDAI AUA/KUA + STQC devices |
-| Balance + transactions list | HSM / certified PAD / measured FAR–FRR |
-| Distress finger path (unified pay; capped; SOS best-effort) | Production AML engines, multi-AZ deploy, indexing systems |
-| Bank screen (pooled sub-ledger refs; extend / refund) | Field trial, penetration-test sign-off |
+Someone can run the stack and:
 
-**Success for this build** means someone can run the stack and complete: enrol (or use the demo wallet) → Home → Send (amount and description editable; balance and transactions update) → Request (code visible; copy or share) → Bank → Home and Profile.
+1. Enrol on their phone: phone code → choose fingerprint / face / both → scans (+ optional distress finger) → PIN → **top up with PayPal**.
+2. Sign a merchant in (phone code, shop name, PayPal payout email).
+3. Pay at the merchant terminal: scan → identified (masked) → amount → PIN → paid → customer signed out automatically.
+4. See the sale and its **PayPal payout** on the merchant dashboard; ask the AI assistant about sales, refunds and invoices.
+5. Close the wallet and get the balance **refunded to PayPal**.
 
 ---
 
-## 2. Settlement model (ONE choice)
+## 2. Feature matrix
 
-**Decision: pooled SBI sub-ledger (demo).**
-
-- Customer wallets are rows with a `cbs_account_ref` shadow id; funds are tracked in the local double-entry ledger against counterpart `pool:sbi_pulsepay` / `merchant:<upi>`.
-- Rails (`services/rails.js`) are **stubs** that return synthetic UTRs.
-- **Status:** demo decision pending SBI confirmation of CBS-per-user vs pooled PPI classification.
-- **Do not** implement a second settlement system in this codebase.
-
----
-
-## 3. Feature matrix
-
-| Capability | Status | Notes |
+| Capability | Status | How it was verified |
 |---|---|---|
-| Enrolment UI + API | implemented / partially tested | AUA OTP **mocked** (`services/aua.js`); webcam ≠ fingerprint scanner |
-| Fingerprint / face match | mocked | Cancelable vectors + cosine threshold in code; **FAR/FRR unmeasured**; 1:N scale **unproven** |
-| PAD / liveness | mocked | Not ISO 30107-3 certified |
-| Auth assertion + PIN floor | implemented | |
-| Face step-up / OTP tier | implemented (OTP mocked) | |
-| Double-entry ledger (balanced request groups) | implemented | Unit-tested balance helper; DB integration needs Postgres |
-| Reserve → settle → confirm | implemented (rail stub) | |
-| Pending + idempotent reconcile if confirm fails after rail OK | implemented | Status `pending`; retry `/execute` |
-| Distress unified path | implemented | Not invisible to attacker — amount/UI/timing can leak; SOS/reversal **best-effort** |
-| Family delegates | implemented in code | **Deferred** from MVP acceptance |
-| Request QR / share | implemented (frontend) | |
-| Send UI → live pay | implemented when session exists | Else demo localStorage ledger |
-| Compliance (RBI/DPDP/UIDAI) | design intention only | Not verified; no legal sign-off |
-| “No drawbacks / no-loop proof” | design argument | **Not** a verified formal proof against production ops |
+| Enrolment + chosen ID method (fingerprint / face / both) | implemented | API end-to-end tests; UI sign-in path in browser |
+| Biometric 1:N match with ambiguity margin, collision check | implemented (demo-grade vectors) | unit + end-to-end tests; **FAR/FRR unmeasured** |
+| Liveness / PAD | placeholder | a printed photo passes; flag is client-asserted |
+| Pay session (identify → amount → PIN, single use, 2 min, cancel) | implemented | end-to-end tests |
+| PIN lockout (3 tries / 30 min) | implemented | end-to-end tests |
+| Distress finger (capped $25, silent SOS, AML alert, same screens) | implemented | end-to-end tests |
+| **PayPal Checkout top-up** (JS SDK v6 + Orders v2 create/capture) | implemented | REST client tested against a local fake PayPal (declines, lost responses, amount mismatch, unconfirmed-capture sweep); **live sandbox not yet run** (needs your sandbox keys) |
+| **Refund to PayPal captures** on wallet close | implemented | fake PayPal: newest capture first, retry after failure, lost response refunded once; live sandbox pending |
+| **PayPal Payouts** to merchants (instant + cash-out) and payees | implemented | fake PayPal: pending to success, returned items, lost response paid once, 5xx retried; live sandbox pending |
+| **PayPal webhooks** (signature-verified; payouts, disputes, invoices) | implemented | fake PayPal: verified, unverified, redelivered and duplicate events; real deliveries need a public URL (Render) |
+| Double-entry ledger (wallet / pool / merchant / payee) | implemented | every group balanced; wallet balances and the pool reconcile in tests |
+| AI merchant assistant (GLM on Bedrock) | implemented | **live** against Bedrock: sales, anomalies, refund proposal; tests against a local Bedrock stand-in: proposals only, masked customers, demo question cap |
+| Assistant PayPal invoice tools (Agent Toolkit) | implemented | needs PayPal sandbox keys; not yet run live |
+| Merchant dashboard (AG Grid + AG Charts) | implemented | browser |
+| Zapier events | implemented | not run against a live Zap |
+| Elastic activity index + assistant search | implemented | request format verified against a mock server only |
+| OpenAPI spec | done | Redocly lint: valid |
+| Postman collection | done | Newman: 13 requests, 16/16 assertions (last run before the demo mode and refund changes) |
+| "Try the demo" (one-tap shop + customer per visitor) | implemented | tests: off unless `DEMO_MODE`, isolated per visitor, never touches PayPal, per-visitor limit; browser run end to end |
+| Merchant refunds | implemented | only from money PulsePay still holds for the merchant (not after a payout); tests |
+| Automated tests | 110 | `npm run test:db` (real Postgres, local PayPal and Bedrock stand-ins); every test mutation-checked |
+| Render blueprint | written | not deployed from here |
+| Family / delegates | API only | deferred from MVP |
 
 ---
 
-## 4. Auth policy matrix
+## 3. Money model
 
-| Flow | Required | Skipped | Closed vs exception |
-|---|---|---|---|
-| Normal pay | Fingerprint match + PIN; face if tier requires; OTP if top tier | — | Fail-closed on mismatch / rail fail |
-| Distress pay | Distinct distress finger + PIN | Face/OTP step-up | Same response shape as normal; **amount capped**; SOS async best-effort |
-| Enrolment when AUA mocked / outage | Demo OTP path in stub | Real UIDAI | Fail-closed if KMS/JWT unset at boot; AUA stub is the **documented demo exception** |
+PulsePay holds customer funds in its PayPal account (`pool:paypal`) and records who is owed what in a double-entry ledger:
 
-Distress is **not** invisible: coerced amount, merchant UI, and timing can still leak. Reversal and SOS are **not guaranteed**.
-
----
-
-## 5. Biometrics (honest)
-
-Webcam / demo capture is a **mock** stand-in for AePS. Templates are encrypted cancelable vectors in this repo’s design, but:
-
-- FAR / FRR are **unmeasured**
-- 1:N identification at bank scale is **unproven**
-- No certified PAD numbers are claimed
-
----
-
-## 6. Data lifecycle (short)
-
-| Deleted / deactivated on re-issue or wallet close | May remain |
+| Event | Ledger |
 |---|---|
-| Active biometric template rows (`active=false`, new salt) | Prior ciphertext until operational purge |
-| Live wallet balance (refund → 0, inactive) | `ledger_entries`, `transactions`, `audit_log`, `aml_alerts` (reference-only; no raw biometrics by design) |
-| Session JWT in browser (clear session) | Server logs, backups, stub SMS provider logs if enabled |
+| Top-up captured | debit `pool:paypal` / credit `wallet:<id>` |
+| Payment at a shop | debit `wallet:<id>` / credit `merchant:<id>` |
+| Send to a PayPal email | debit `wallet:<id>` / credit `payee:<email>` |
+| Payout SUCCESS | debit `merchant:<id>` or `payee:<email>` / credit `pool:paypal` |
+| Merchant refund | debit `merchant:<id>` / credit `wallet:<id>` |
+| Paid PayPal invoice | debit `pool:paypal` / credit `merchant:<id>` |
+| Wallet closed | debit `wallet:<id>` / credit `pool:paypal` (capture refunded) |
 
-No separate deletion subsystem ships in this demo beyond template deactivation + wallet refund.
+Holding customer balances like this needs PayPal's approval for Payouts and a compliance review before any live use.
 
 ---
 
-## 7. Open decisions
+## 4. Auth policy
 
-| Decision | Status | Blocker |
+| Flow | Required | Notes |
 |---|---|---|
-| Settlement confirmation with SBI (pooled vs CBS-per-user) | open — demo uses pooled | SBI product / compliance |
-| STQC / AePS device access at BC | open | Hardware + SBI ops |
-| Distress reversal authority | open — best-effort flag only | Fraud desk / UPI dispute policy |
-| Notification model (contact vs feature phone / 123Pay IVR) | open — stub SMS/SOS | Channel reality for phone-light users |
-| Cost model | unknown | No specialist owners; no field-trial budget in this repo |
-| Numeric RBI/NPCI thresholds | provisional env defaults | Current circulars |
+| Merchant payment | chosen biometric(s) + PIN | no OTP: the customer's phone may be at home |
+| Distress payment | distress finger in place of the payment finger + PIN | capped; SOS best-effort |
+| Own-phone send / top-up / close | customer session (+ PIN for send) | idempotency key per send |
+| Existing customer at enrolment | phone code + current PIN | PIN and biometrics never replaced here |
+| AI assistant actions | merchant confirms in the app | the model can only propose |
 
 ---
 
-## 8. Demo success criteria (measurable here) vs production (unset)
+## 5. Open items
 
-**Demo (this repo can check):**
-
-1. Frontend builds; Home shows balance + txs in mint UI.
-2. Send edits amount/description; demo or live path updates balance/txs.
-3. Request shows QR + code; copy/share works (clipboard fallback).
-4. Bank shows pooled refs; extend/refund call live API when enrolled.
-5. `npm test` in `backend/` passes ledger balance unit tests.
-6. Enrol + merchant pay still reachable from Profile.
-
-**Production targets:** unset (FAR/FRR, latency SLOs, RPO/RTO, legal compliance) — not claimed.
+| Item | Blocker |
+|---|---|
+| Run the live PayPal sandbox flow (top-up, payout, refund, invoices) | sandbox Client ID / Secret in `.env` |
+| GLM 5.3 | not enabled on the Bedrock account (GLM 5 used automatically) |
+| Webhooks verified end-to-end | public URL (Render deploy) + `PAYPAL_WEBHOOK_ID` |
+| Real fingerprint capture | external scanner hardware |
+| FAR/FRR, liveness certification | real models + evaluation data |

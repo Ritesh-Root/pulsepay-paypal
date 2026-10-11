@@ -1,30 +1,33 @@
 """
-PulsePay-SBI CV Service (ARCHITECTURE §4.1, §4.2).
+PulsePay CV Service: camera frame -> embedding vector.
 
-India-resident, model-agnostic inference plane. Replaces the Amazon build, which
-shipped face images to Amazon Nova / AWS Bedrock in us-east-1 (a data-residency
-breach) and returned a SHA3 hash used for exact-match (which can never match two
-captures of the same face).
+The browser sends a frame; this service returns a numeric vector and keeps no
+image. The backend matches vectors by cosine similarity against encrypted,
+cancelable templates. Running the model next to the backend means raw biometric
+images never leave the deployment.
 
-This service now returns a face EMBEDDING VECTOR; the backend matches by cosine
-similarity over an encrypted, cancelable template. The embedding here is produced
-by a local, in-cluster model so NO biometric data leaves India.
-
-NOTE: the embedding function below is a lightweight OpenCV stand-in for the
-production model (an on-prem ONNX ArcFace-class network). It is good enough to
-demonstrate the cosine-threshold pipeline; swap `embed()` for the real model with
-no API change. Liveness here is a placeholder for certified ISO/IEC 30107-3 PAD.
+NOTE: the embedding functions below are lightweight OpenCV stand-ins for the
+production models (a certified fingerprint extractor and an ArcFace-class face
+network). They demonstrate the cosine-threshold pipeline; swap `embed()` /
+`embed_fingerprint_img()` for real models with no API change. A webcam cannot read
+fingerprint ridges, so fingerprint "scans" here are a visual stand-in. Liveness is a
+placeholder for certified ISO/IEC 30107-3 PAD. FAR/FRR are unmeasured.
 """
 import os
 import base64
 import numpy as np
 import cv2
-from fastapi import FastAPI, UploadFile, File, Form, Body
+from fastapi import FastAPI, UploadFile, File, Body
 from fastapi.middleware.cors import CORSMiddleware
 
 EMBED_DIM = 1024
 
-app = FastAPI(title="PulsePay-SBI CV Service (India-resident)")
+# Reject frames that carry too little detail to identify anyone (blank wall, lens
+# covered, heavy motion blur). Tunable per camera.
+MIN_SHARPNESS = float(os.environ.get("MIN_SHARPNESS", "15"))  # variance of the Laplacian
+MIN_CONTRAST = float(os.environ.get("MIN_CONTRAST", "12"))    # grey-level standard deviation
+
+app = FastAPI(title="PulsePay CV Service")
 
 # Scoped CORS (no wildcard). Only configured origins.
 origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
@@ -42,6 +45,32 @@ _face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_front
 def _decode(image_bytes: bytes):
     arr = np.frombuffer(image_bytes, np.uint8)
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+
+def quality(gray):
+    """(sharpness, contrast, ok) for a grey image."""
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    contrast = float(gray.std())
+    return sharpness, contrast, sharpness >= MIN_SHARPNESS and contrast >= MIN_CONTRAST
+
+
+def quality_score(sharpness, contrast):
+    """0-100 for display: how far above the minimums this frame is."""
+    s = min(1.0, sharpness / (MIN_SHARPNESS * 6))
+    c = min(1.0, contrast / (MIN_CONTRAST * 4))
+    return int(round(100 * (0.6 * s + 0.4 * c)))
+
+
+def guide_crop(img):
+    """
+    The capture screen shows a finger guide in the middle of the frame (~40% of the
+    width, ~2/3 of the height). Use only that region so the background does not
+    dominate the vector.
+    """
+    h, w = img.shape[:2]
+    cw, ch = int(w * 0.4), int(h * 0.667)
+    x0, y0 = (w - cw) // 2, (h - ch) // 2
+    return img[y0:y0 + ch, x0:x0 + cw]
 
 
 def detect_face(img):
@@ -76,14 +105,13 @@ def embed(img, bbox) -> list:
     return vec.tolist()
 
 
-def embed_fingerprint_img(img) -> list:
+def embed_fingerprint_img(gray) -> list:
     """
     Stand-in fingerprint embedding (PRIMARY payment factor). Production: a certified
-    fingerprint-scanner SDK / minutiae extractor (AePS-grade STQC device). Here we
-    enhance the ridge image and produce a normalized vector so the cosine pipeline
+    fingerprint-scanner SDK / minutiae extractor (a certified scanner). Here we
+    enhance the guide region and produce a normalized vector so the cosine pipeline
     works end-to-end. Same return shape as the production extractor.
     """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     side = int(round(EMBED_DIM ** 0.5))  # 32x32 = 1024
@@ -100,7 +128,7 @@ def embed_fingerprint_img(img) -> list:
 
 @app.get("/")
 async def root():
-    return {"status": "PulsePay-SBI CV service running", "residency": "india", "model": "local-cv:v1"}
+    return {"status": "PulsePay CV service running", "model": "local-cv:v1"}
 
 
 @app.post("/embed-fingerprint")
@@ -124,7 +152,14 @@ async def embed_fingerprint(payload: dict = Body(default=None), image: UploadFil
         if img is None:
             return {"error": "Invalid image", "embedding": []}
 
-        return {"embedding": embed_fingerprint_img(img), "quality": 90, "model_version": "local-cv:v1"}
+        gray = cv2.cvtColor(guide_crop(img), cv2.COLOR_BGR2GRAY)
+        sharpness, contrast, ok = quality(gray)
+        if not ok:
+            return {"error": "Finger not clear. Hold it steady inside the guide, in good light.",
+                    "embedding": [], "quality": quality_score(sharpness, contrast)}
+
+        return {"embedding": embed_fingerprint_img(gray), "quality": quality_score(sharpness, contrast),
+                "model_version": "local-cv:v1"}
     except Exception as e:
         print(f"embed-fingerprint error: {e}")
         return {"error": str(e), "embedding": []}
@@ -133,8 +168,8 @@ async def embed_fingerprint(payload: dict = Body(default=None), image: UploadFil
 @app.post("/embed-face")
 async def embed_face(payload: dict = Body(default=None), image: UploadFile = File(default=None)):
     """
-    Accepts JSON { image: <base64> } (preferred, used by the backend) or a multipart
-    file. Returns { embedding:[...], liveness_passed, pad_score, face_detected }.
+    Accepts JSON { image: <base64> } or a multipart file (the web app
+    sends a multipart frame). Returns { embedding:[...], liveness_passed, pad_score, face_detected }.
     """
     try:
         if payload and payload.get("image"):
@@ -153,12 +188,22 @@ async def embed_face(payload: dict = Body(default=None), image: UploadFile = Fil
 
         count, bbox = detect_face(img)
         if count == 0:
-            return {"face_detected": False, "liveness_passed": False, "pad_score": 0, "embedding": []}
+            return {"face_detected": False, "liveness_passed": False, "pad_score": 0,
+                    "error": "No face found. Look straight at the camera.", "embedding": []}
         if count > 1:
             return {"face_detected": True, "liveness_passed": False, "pad_score": 50,
-                    "error": "Multiple faces detected", "embedding": []}
+                    "error": "More than one face in view. Only the customer should be in frame.", "embedding": []}
+        x, y, w, h = bbox
+        if w < img.shape[1] * 0.15:
+            return {"face_detected": True, "liveness_passed": False, "pad_score": 0,
+                    "error": "Move closer to the camera.", "embedding": []}
+        sharpness, contrast, ok = quality(cv2.cvtColor(img[y:y + h, x:x + w], cv2.COLOR_BGR2GRAY))
+        if not ok:
+            return {"face_detected": True, "liveness_passed": False, "pad_score": 0,
+                    "error": "Face not clear. Hold steady in good light.", "embedding": []}
 
-        # Placeholder PAD. Production: certified ISO/IEC 30107-3 PAD on the capture device.
+        # Placeholder PAD: NOT a liveness check (a printed photo passes). Production:
+        # certified ISO/IEC 30107-3 PAD on the capture device.
         pad_score = 90
         liveness_passed = pad_score >= int(float(os.environ.get("LIVENESS_THRESHOLD", "0.5")) * 100)
 

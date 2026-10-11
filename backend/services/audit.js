@@ -1,7 +1,8 @@
 /**
- * Tamper-evident, append-only, hash-chained audit log (ARCHITECTURE §4.10).
- * Records NO biometric data (reference-only) so it survives a DPDP erasure under a
- * PMLA legal hold. Each row's record_hash chains the previous row's hash.
+ * Tamper-evident, append-only, hash-chained audit log.
+ * Records NO biometric data (references only), so it can be kept for anti-money-
+ * laundering retention even after a customer's biometric data is erased. Each row's
+ * record_hash chains the previous row's hash.
  */
 const crypto = require('crypto');
 

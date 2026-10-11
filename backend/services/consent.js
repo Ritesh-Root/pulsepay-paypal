@@ -1,5 +1,5 @@
 /**
- * Consent ledger (ARCHITECTURE §4.7) — DPDP Act 2023.
+ * Consent ledger for biometric data (GDPR / BIPA-style explicit, per-purpose consent).
  * Append-only, hash-chained, per-purpose, time-stamped, revocable. References only —
  * never any biometric data. A single boolean cannot evidence purpose limitation or
  * support withdrawal, so we record one row per granted/withdrawn purpose.
@@ -21,16 +21,17 @@ async function record(pool, { subjectId, purpose, granted, channel, language }) 
     const r = await pool.query(
         `INSERT INTO consent_records (subject_id, purpose, granted, channel, language, prev_hash, record_hash)
          VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-        [subjectId, purpose, !!granted, channel || 'branch', language || 'en', prevHash, recordHash]
+        [subjectId, purpose, !!granted, channel || 'app', language || 'en', prevHash, recordHash]
     );
     return r.rows[0].id;
 }
 
-/** Grant the standard enrolment purpose set in one call. */
-async function recordEnrolmentConsent(pool, { subjectId, channel, language }) {
-    for (const purpose of ['wallet_auth', 'fraud_prevention', 'kyc', 'distress']) {
+/** Grant the enrolment purpose set in one call ('distress' only if a distress finger was enrolled). */
+async function recordEnrolmentConsent(pool, { subjectId, channel, language, distress }) {
+    const purposes = ['wallet_auth', 'fraud_prevention', 'kyc', ...(distress ? ['distress'] : [])];
+    for (const purpose of purposes) {
         await record(pool, { subjectId, purpose, granted: true, channel, language });
     }
 }
 
-module.exports = { record, recordEnrolmentConsent, PURPOSES };
+module.exports = { record, recordEnrolmentConsent };
