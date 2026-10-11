@@ -14,16 +14,17 @@ const crypto = require('crypto');
 const KEY_REF = 'kms:data-key:v1';
 
 function loadDataKey() {
-    const hex = process.env.KMS_DATA_KEY;
-    if (!hex) {
+    const raw = process.env.KMS_DATA_KEY;
+    if (!raw) {
         throw new Error(
             'FATAL: KMS_DATA_KEY is not set. Biometric templates cannot be encrypted. ' +
             'Refusing to start (fail-closed). Provision a 32-byte hex key via Vault/KMS.'
         );
     }
-    const key = Buffer.from(hex, 'hex');
+    // 64 hex chars, or base64 (Render's generateValue makes a base64 256-bit value).
+    const key = /^[0-9a-f]{64}$/i.test(raw) ? Buffer.from(raw, 'hex') : Buffer.from(raw, 'base64');
     if (key.length !== 32) {
-        throw new Error('FATAL: KMS_DATA_KEY must be 32 bytes (64 hex chars) for AES-256.');
+        throw new Error('FATAL: KMS_DATA_KEY must be 32 bytes (64 hex chars or base64) for AES-256.');
     }
     return key;
 }

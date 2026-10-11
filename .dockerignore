@@ -1,0 +1,16 @@
+# Build context for the root Dockerfile (hosted demo).
+**/node_modules
+**/.env
+**/.env.*
+!**/.env.example
+**/dist
+**/.vite
+**/__pycache__
+**/*.pyc
+**/*.log
+.git
+.claude
+.agents
+docs
+postman
+backend/test

@@ -2,8 +2,12 @@
 // The web demo uses the device camera as a stand-in for a fingerprint sensor;
 // captured frames go to the CV service, which returns a vector (no image is stored).
 
-export const API_URL = (import.meta as any).env?.VITE_API_URL || "http://localhost:5000";
-export const CV_URL = (import.meta as any).env?.VITE_CV_URL || "http://localhost:8000";
+// Base URLs. The one-service deploy builds with VITE_API_URL=/ and VITE_CV_URL=/cv, so the
+// page calls its own host; local development talks to the separate ports.
+const env = (import.meta as any).env || {};
+const base = (url: string) => url.replace(/\/+$/, "");
+export const API_URL = base(env.VITE_API_URL || "http://localhost:5000");
+export const CV_URL = base(env.VITE_CV_URL || "http://localhost:8000");
 
 export type IdMethod = "fingerprint" | "face" | "both";
 
@@ -61,7 +65,7 @@ async function req(path: string, opts: RequestInit = {}, token?: string): Promis
   try {
     r = await fetch(`${API_URL}${path}`, { ...opts, headers });
   } catch {
-    return { ok: false, status: 0, data: { error: "Can't reach the PulsePay server. Is the API running on port 5000?" } };
+    return { ok: false, status: 0, data: { error: "Can't reach the PulsePay server. Check your connection and try again." } };
   }
   let data: any = {};
   try { data = await r.json(); } catch { /* empty body */ }
@@ -83,7 +87,7 @@ export async function embed(endpoint: "fingerprint" | "face", blob: Blob): Promi
     const r = await fetch(`${CV_URL}/embed-${endpoint}`, { method: "POST", body: fd });
     return await r.json();
   } catch {
-    return { embedding: [], error: "Can't reach the scanner service on port 8000." };
+    return { embedding: [], error: "Can't reach the scanner service. Try again in a moment." };
   }
 }
 

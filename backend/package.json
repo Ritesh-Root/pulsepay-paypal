@@ -11,7 +11,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@paypal/agent-toolkit": "^1.11.0",
     "bcryptjs": "^2.4.3",

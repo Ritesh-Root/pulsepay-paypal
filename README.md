@@ -13,16 +13,17 @@ Every way we pay in a shop today assumes the customer carries something: a card,
 ## Try it in a minute
 
 ```bash
-cp .env.example .env        # fill POSTGRES_PASSWORD, JWT_SECRET, KMS_DATA_KEY (see the file)
-docker compose up --build
+sh scripts/setup-env.sh     # writes .env with fresh random secrets
+docker compose up --build   # the first build takes a few minutes
 ```
 
 Open http://localhost:3000 and tap **Open my demo shop**. You get your own shop with this morning's sales already paid out, plus a demo customer holding $50:
 
 1. **Checkout → Scan finger → Use the demo finger** (no camera needed). The terminal shows "Customer ••1234".
 2. Enter a bill (say **$12**) and the **PIN** shown in the banner. Paid; the customer is signed out automatically.
-3. **Dashboard:** the sale, the morning's PayPal payouts and the sales chart. **Cash out** sends today's balance to PayPal. **Assistant** (needs a Bedrock API key in `.env`): "How much did I take today?", "Anything unusual?", "Refund the last payment".
-4. **User** tab: the same customer's wallet, now $38. **Bank → Close wallet** refunds the rest to PayPal.
+3. **Dashboard:** the sale, the morning's PayPal payouts and the sales chart. **Assistant** (needs a Bedrock API key in `.env`): "How much did I take today?", "Anything unusual?", "Refund the last payment". Refunds work until the sale is cashed out.
+4. **Cash out** on the Dashboard sends what the shop is owed to PayPal.
+5. **User** tab: the same customer's wallet, now $38 ($50 if you refunded). **Wallet → Close wallet** refunds the rest to PayPal.
 
 Prefer the real thing? Open the **User** tab on a laptop with a webcam, create a wallet (the camera stands in for a fingerprint scanner), then pay at the **Merchant** tab. Without PayPal keys everything runs on clearly labelled simulated PayPal; add sandbox keys to use real PayPal Checkout and Payouts ([setup](#paypal-sandbox)).
 
@@ -87,15 +88,14 @@ Where it fits first: places where carrying a phone or wallet is awkward or risky
 
 Every money-moving call is idempotent: retries after a timeout reuse the same `PayPal-Request-Id` (or `sender_batch_id`), so nothing is captured, refunded or paid out twice.
 
-## Sponsor tools
+## Partner tools
 
-| Sponsor | How PulsePay uses it |
+| Tool | How PulsePay uses it |
 |---|---|
 | **Amazon Bedrock** | GLM powers the merchant assistant ([`bedrock.js`](backend/services/bedrock.js)); falls back from GLM 5.3 to GLM 5 automatically |
 | **AG Grid** (AG Grid + AG Charts) | Merchant dashboard: payments grid with refunds, payouts grid with PayPal status, sales-by-hour chart ([`merchant-dashboard.tsx`](frontend/src/app/components/merchant-dashboard.tsx)) |
-| **Postman** | The demo as a runnable collection with chained tokens ([`postman/`](postman/)) |
-| **APIMatic** | [`openapi.yaml`](openapi.yaml): OpenAPI 3.1, lint-clean, for SDK and docs generation |
-| **Render** | [`render.yaml`](render.yaml) deploys backend, CV service, frontend and Postgres; gives webhooks a public URL |
+| **Postman** | The demo as a runnable collection with chained tokens: sign-ups, a PayPal-funded wallet, a payment, cash-out, a refused late refund, closing the wallet ([`postman/`](postman/)) |
+| **Render** | [`render.yaml`](render.yaml) deploys the whole demo as one web service plus Postgres; gives PayPal webhooks a public URL |
 | **Zapier** | SOS alerts, receipts, payout failures and disputes are posted to a Zapier Catch Hook so a Zap can text or email without code |
 | **Elastic** | Optional activity index; the assistant gets a search tool when configured ([`elastic.js`](backend/services/elastic.js)) |
 
@@ -120,6 +120,8 @@ flowchart TB
     api --> ai["Amazon Bedrock (GLM)<br/>+ PayPal Agent Toolkit"]
     api --> side["Zapier · Elastic"]
 ```
+
+Locally the web app, API and CV service run as separate containers. The hosted demo packs them into one container ([`Dockerfile`](Dockerfile)): the API serves the web app and forwards camera frames to the CV service, so there is one URL and the CV service is never exposed.
 
 Money is kept in a balanced double-entry ledger. A top-up debits PulsePay's PayPal pool and credits the customer's wallet; a sale moves that to what PulsePay owes the merchant; a successful payout settles it. The tests check that every entry balances and that the pool always equals what PulsePay owes. Details: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#where-the-money-is-the-ledger).
 
@@ -167,17 +169,26 @@ docker compose --profile test up -d postgres-test   # throwaway Postgres on 127.
 cd backend && npm run test:db
 ```
 
-110 tests: the ledger, biometric matching, the merchant terminal over HTTP (scan, PIN, lockout, distress, "both" mode), payouts, top-ups, refunds, webhooks, the AI assistant (against a local Bedrock stand-in), the demo mode and database upgrades. The PayPal tests run the real client against [a local stand-in for the PayPal API](backend/test/support/fake-paypal.js) that follows PayPal's documented behaviour, including lost responses and duplicate requests. Every test was checked by breaking the code it protects and confirming it fails. `npm test` alone runs the tests that need no database.
+126 tests: the ledger, biometric matching, the merchant terminal over HTTP (scan, PIN, lockout, distress, "both" mode), payouts, top-ups, refunds, webhooks, the AI assistant (against a local Bedrock stand-in), the demo mode, database upgrades and the one-URL hosting. The PayPal tests run the real client against [a local stand-in for the PayPal API](backend/test/support/fake-paypal.js) that follows PayPal's documented behaviour, including lost responses and duplicate requests. Every test was checked by breaking the code it protects and confirming it fails. `npm test` alone runs the tests that need no database.
 
-The Postman collection runs the demo flow against a running server:
+The Postman collection runs the demo flow against a running server (15 requests, 19 checks):
 
 ```bash
 npx newman run postman/PulsePay.postman_collection.json --env-var baseUrl=http://localhost:5000
 ```
 
-### Deploy
+### Deploy (one URL on Render)
 
-[`render.yaml`](render.yaml) deploys everything on Render, with the demo shortcuts on and PayPal in sandbox. Then create a PayPal webhook for `https://<backend>/api/paypal/webhook` (events `PAYMENT.PAYOUTS-ITEM.*`, `CUSTOMER.DISPUTE.CREATED`, `INVOICING.INVOICE.PAID`) and set `PAYPAL_WEBHOOK_ID`.
+[`render.yaml`](render.yaml) is a Render Blueprint: one web service built from the root [`Dockerfile`](Dockerfile) (API, web app and CV service in one container) plus Postgres, with the demo shortcuts on and PayPal in sandbox.
+
+1. Render dashboard → **New → Blueprint** → pick this repository.
+2. When asked, paste `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` (sandbox) and `AWS_BEARER_TOKEN_BEDROCK`. Render generates the other secrets, and the database schema is applied on start.
+3. Open `https://<service>.onrender.com` and tap **Open my demo shop**.
+4. Optional: create a PayPal webhook for `https://<service>.onrender.com/api/paypal/webhook` (events `PAYMENT.PAYOUTS-ITEM.*`, `CUSTOMER.DISPUTE.CREATED`, `INVOICING.INVOICE.PAID`) and add `PAYPAL_WEBHOOK_ID` to the service.
+
+The blueprint uses free plans: the service sleeps after 15 idle minutes (the next visit takes about a minute) and a free database expires 30 days after creation. To keep the demo up through judging (Dec 1–15, 2026), move the database to a paid plan, and the service too if the wake-up wait matters.
+
+The same container runs locally: `docker build -t pulsepay .` then `docker run -p 10000:10000 --env-file .env -e DATABASE_URL=<postgres url> pulsepay` and open http://localhost:10000.
 
 ## Repository map
 
@@ -188,7 +199,8 @@ npx newman run postman/PulsePay.postman_collection.json --env-var baseUrl=http:/
 | `cv-service/` | FastAPI + OpenCV: camera frame to vector |
 | `database/schema.sql` | Postgres schema |
 | `docs/HOW_IT_WORKS.md` | Detailed walkthrough with diagrams |
-| `openapi.yaml`, `postman/` | API spec and runnable collection |
+| `openapi.yaml`, `postman/` | OpenAPI 3.1 spec and runnable Postman collection |
+| `Dockerfile`, `render.yaml` | The hosted demo: one container, one Render Blueprint |
 | `docs/archive/` | The original design from an earlier hackathon (India/UPI), kept for history |
 
 ## License

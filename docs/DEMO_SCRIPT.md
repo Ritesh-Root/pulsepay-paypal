@@ -1,6 +1,6 @@
-# PulsePay demo video script (about 3 minutes)
+# PulsePay demo video script (2 minutes 50 seconds)
 
-Record the browser at phone width (about 400 px) so it looks like a phone. Start the stack with `docker compose up --build`, open http://localhost:3000, and keep the PayPal sandbox buyer login handy if you show a real top-up.
+The rules require a video **under 3 minutes**, public on YouTube, with no copyrighted music. Record the browser at phone width (about 400 px) so it looks like a phone. Use the hosted demo, or start the stack with `docker compose up --build` and open http://localhost:3000, and keep the PayPal sandbox buyer login handy if you show a real top-up.
 
 ---
 
@@ -32,25 +32,25 @@ Record the browser at phone width (about 400 px) so it looks like a phone. Start
 
 > "At the shop, the customer brings nothing. The merchant's phone scans them, PulsePay finds who it is among all customers, and shows only a masked label. The merchant types the bill, the customer types their PIN, and the terminal signs them out, like a card leaving the reader."
 
-### 1:30 – 2:00 · The merchant gets paid (Dashboard tab)
+### 1:30 – 2:05 · The AI assistant (Assistant tab)
 
-**Screen:** Dashboard: tiles, sales chart, payments grid, PayPal payouts grid. Tap **Cash out**.
+**Screen:** ask "How much did I take today?", then "Anything unusual?", then "Pay out my balance to PayPal" → **Confirm**. With PayPal sandbox keys, also "Invoice sam@example.com for 2 coffees at $4.50".
 
-> "Sales show up live. Cash out sends the balance to the merchant's PayPal account with PayPal Payouts, and the status updates from PayPal's webhooks. Every movement is in a double-entry ledger, so the money always adds up."
+> "The assistant runs on GLM in Amazon Bedrock with the PayPal Agent Toolkit. It answers in plain language, spots unusual payments, creates PayPal invoices, and drafts refunds and cash-outs. Money moves only when a person taps Confirm."
 
-### 2:00 – 2:30 · The AI assistant (Assistant tab)
+### 2:05 – 2:30 · The merchant gets paid (Dashboard tab)
 
-**Screen:** ask "How much did I take today?", then "Anything unusual?", then "Refund the last payment" → **Confirm**.
+**Screen:** Dashboard: tiles, sales chart, payments grid, and the new cash-out in the PayPal payouts grid.
 
-> "The assistant runs on GLM in Amazon Bedrock with the PayPal Agent Toolkit. It answers in plain language, spots unusual payments, and drafts refunds and PayPal invoices, but it can only propose. A person confirms every money movement."
+> "Sales show up live, and the cash-out went to the merchant's PayPal account with PayPal Payouts. Until a sale is cashed out, the merchant can refund it from this grid. Every movement is in a double-entry ledger, so the money always adds up."
 
-### 2:30 – 2:50 · Safety
+### 2:30 – 2:42 · Safety
 
 **Screen:** pay $80 with the distress finger: the screens look normal and "$25.00" moves (show the wallet history). Show three wrong PINs → locked.
 
 > "If someone forces you to pay, use your distress finger. Everything looks normal, but at most $25 moves and your emergency contact gets a silent alert. Wrong PINs lock after three tries, and the wallet itself is capped and expires in days."
 
-### 2:50 – 3:00 · Close
+### 2:42 – 2:50 · Close
 
 **Screen:** User → Wallet → **Close wallet · refund to PayPal**.
 

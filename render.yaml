@@ -1,94 +1,66 @@
-# Render Blueprint: deploys the whole PulsePay stack.
-#   Dashboard -> New -> Blueprint -> pick this repo. Fill the `sync: false` secrets
-#   when Render asks. After the first deploy, set VITE_API_URL / VITE_CV_URL on the
-#   frontend to the backend / CV service URLs and redeploy it (static sites bake env
-#   in at build time), and add the frontend URL to the backend's CORS_ORIGINS.
+# Render Blueprint: the hosted PulsePay demo at one URL.
+#   Dashboard -> New -> Blueprint -> pick this repo -> paste the three secrets it asks for.
 #
-# A public backend URL is also what PayPal webhooks need:
-#   https://<backend>.onrender.com/api/paypal/webhook   (set PAYPAL_WEBHOOK_ID after creating it)
+# One web service runs the root Dockerfile: the backend serves the API and the web app
+# and forwards camera frames to the CV service inside the same container. The database
+# schema is applied on start. Secrets marked `generateValue` are created by Render.
+#
+# Free plans cost nothing; the service sleeps after 15 idle minutes (the next visit takes
+# about a minute) and a free database expires 30 days after creation. Judging runs
+# Dec 1-15, 2026, so before then switch the database to a paid plan (0.1c-256mb) and,
+# to skip the wake-up wait, the service to 0.5c-512mb, in the dashboard.
+#
+# After the first deploy, create a PayPal webhook for
+#   https://<service>.onrender.com/api/paypal/webhook
+# (events PAYMENT.PAYOUTS-ITEM.*, CUSTOMER.DISPUTE.CREATED, INVOICING.INVOICE.PAID) and add
+# PAYPAL_WEBHOOK_ID to the service's environment.
 
 databases:
   - name: pulsepay-db
-    plan: basic-256mb
+    plan: free
+    region: virginia
     databaseName: pulsepay
     user: pulsepay
 
 services:
   - type: web
-    name: pulsepay-backend
-    runtime: node
-    plan: starter
-    buildCommand: cd backend && npm ci
-    startCommand: node backend/scripts/migrate.js && node backend/server.js
+    name: pulsepay
+    runtime: docker
+    plan: free
+    region: virginia                # next to Bedrock us-east-1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /health
     envVars:
-      - key: NODE_ENV
-        value: production
       - key: DATABASE_URL
         fromDatabase: { name: pulsepay-db, property: connectionString }
       - key: JWT_SECRET
         generateValue: true
-      - key: KMS_DATA_KEY          # 64 hex chars: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-        sync: false
-      - key: CORS_ORIGINS          # e.g. https://pulsepay-frontend.onrender.com
-        sync: false
+      - key: KMS_DATA_KEY           # encrypts biometric templates; base64 256-bit, kept across deploys
+        generateValue: true
+      - key: TRUST_PROXY            # Render's proxy: rate limits see the visitor, not the proxy
+        value: "1"
+      # PayPal sandbox (developer.paypal.com -> Apps & Credentials -> Sandbox app)
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_CLIENT_SECRET
         sync: false
       - key: PAYPAL_ENVIRONMENT
         value: sandbox
-      - key: PAYPAL_WEBHOOK_ID
-        sync: false
-      - key: PAYOUT_MODE          # manual: merchants tap "Cash out" (sales stay refundable until then)
+      - key: PAYOUT_MODE            # manual: merchants tap "Cash out" (sales stay refundable until then)
         value: manual
-      - key: TRUST_PROXY          # Render's proxy: rate limits see the visitor, not the proxy
-        value: "1"
+      # GLM on Amazon Bedrock (Bedrock console -> API keys)
       - key: AWS_BEARER_TOKEN_BEDROCK
         sync: false
       - key: BEDROCK_REGION
         value: us-east-1
       - key: BEDROCK_MODEL_ID
         value: zai.glm-5.3
-      - key: ZAPIER_WEBHOOK_URL
-        sync: false
-      - key: ELASTIC_URL
-        sync: false
-      - key: ELASTIC_API_KEY
-        sync: false
+      - key: BEDROCK_FALLBACK_MODEL_ID
+        value: zai.glm-5
       # Demo shortcuts for judges: codes shown in the app and the one-tap "Try the demo"
       # shop. Allowed on PayPal sandbox; the server refuses both with live PayPal.
       - key: DEMO_SHOW_OTP
         value: "true"
       - key: DEMO_MODE
         value: "true"
-
-  - type: web
-    name: pulsepay-cv
-    runtime: docker
-    plan: starter
-    dockerfilePath: ./cv-service/Dockerfile
-    dockerContext: ./cv-service
-    healthCheckPath: /
-    envVars:
-      - key: CORS_ORIGINS
-        sync: false
-
-  - type: web
-    name: pulsepay-frontend
-    runtime: static
-    buildCommand: cd frontend && npm ci && npm run build
-    staticPublishPath: frontend/dist
-    headers:
-      - path: /*
-        name: Cross-Origin-Opener-Policy
-        value: same-origin-allow-popups   # PayPal JS SDK v6 checkout popup
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-    envVars:
-      - key: VITE_API_URL
-        sync: false
-      - key: VITE_CV_URL
-        sync: false

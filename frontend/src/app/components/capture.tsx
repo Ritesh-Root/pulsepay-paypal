@@ -8,6 +8,8 @@ type Phase = "idle" | "starting" | "ready" | "scanning" | "done" | "error";
 
 type CaptureResult = { embedding: number[]; liveness_passed?: boolean; pad_score?: number };
 
+const MAX_FRAME_WIDTH = 640;
+
 // Real webcam capture. In production the fingerprint comes from an external
 // fingerprint scanner; this web demo uses the camera as a stand-in and sends the
 // frame to the CV service, which returns a vector (no image is stored).
@@ -57,9 +59,12 @@ export function Capture({
     setPhase("scanning");
     setErr("");
     try {
+      // Phones film at 1080p or more; the CV service reduces a frame to 32x32 anyway, and
+      // smaller frames upload and process faster (the thresholds were tuned on 640px webcams).
+      const scale = Math.min(1, MAX_FRAME_WIDTH / (v.videoWidth || MAX_FRAME_WIDTH));
       const canvas = document.createElement("canvas");
-      canvas.width = v.videoWidth || 640;
-      canvas.height = v.videoHeight || 480;
+      canvas.width = Math.round((v.videoWidth || 640) * scale);
+      canvas.height = Math.round((v.videoHeight || 480) * scale);
       canvas.getContext("2d")!.drawImage(v, 0, 0, canvas.width, canvas.height);
       const blob: Blob = await new Promise((res) => canvas.toBlob((b) => res(b!), "image/jpeg", 0.9));
       const r = await embed(endpoint, blob);

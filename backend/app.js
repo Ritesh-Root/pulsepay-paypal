@@ -6,6 +6,7 @@
 const express = require('express');
 const cors = require('cors');
 const { authenticate } = require('./middleware/auth');
+const { webApp, cvProxy } = require('./middleware/hosting');
 
 const enrollRoutes = require('./routes/enroll');
 const merchantRoutes = require('./routes/merchant');
@@ -34,18 +35,15 @@ function createApp(pool) {
         next();
     });
 
-    // Scoped CORS — no wildcard. Only configured origins.
-    const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000')
-        .split(',').map(s => s.trim()).filter(Boolean);
-    app.use(cors({
-        origin(origin, cb) {
-            if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-            return cb(new Error('CORS: origin not allowed'));
-        },
-        credentials: true,
+    // Scoped CORS — no wildcard. Configured origins, Render's public URL, and the page this
+    // app serves itself (the one-service deploy calls its own host).
+    const allowedOrigins = [...(process.env.CORS_ORIGINS || 'http://localhost:3000').split(','), process.env.RENDER_EXTERNAL_URL || '']
+        .map(s => s.trim()).filter(Boolean);
+    app.use(cors((req, cb) => {
+        const origin = req.header('Origin');
+        const ok = !origin || allowedOrigins.includes(origin) || origin === `${req.protocol}://${req.get('host')}`;
+        cb(ok ? null : new Error('CORS: origin not allowed'), { origin: ok, credentials: true });
     }));
-
-    app.use(express.json({ limit: '256kb' })); // tight cap (was 5mb -> DoS surface)
 
     // Lightweight in-process rate limiter (per IP). Production: API-gateway/WAF + Redis.
     const rl = new Map();
@@ -64,6 +62,11 @@ function createApp(pool) {
         if (e.count > RL_MAX) return res.status(429).json({ error: 'Too many requests' });
         next();
     });
+
+    // Camera frames go to the CV service unparsed (one-service deploy only).
+    if (process.env.CV_SERVICE_URL) app.use('/cv', cvProxy(process.env.CV_SERVICE_URL));
+
+    app.use(express.json({ limit: '256kb' })); // tight cap (was 5mb -> DoS surface)
 
     app.locals.pool = pool;
 
@@ -89,6 +92,9 @@ function createApp(pool) {
             res.status(503).json({ status: 'error', db: 'disconnected' });
         }
     });
+
+    // The built web app (one-service deploy only).
+    if (process.env.FRONTEND_DIR) app.use(webApp(process.env.FRONTEND_DIR));
 
     app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 

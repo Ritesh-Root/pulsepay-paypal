@@ -11,7 +11,7 @@ Someone can run the stack and:
 1. Enrol on their phone: phone code → choose fingerprint / face / both → scans (+ optional distress finger) → PIN → **top up with PayPal**.
 2. Sign a merchant in (phone code, shop name, PayPal payout email).
 3. Pay at the merchant terminal: scan → identified (masked) → amount → PIN → paid → customer signed out automatically.
-4. See the sale and its **PayPal payout** on the merchant dashboard; ask the AI assistant about sales, refunds and invoices.
+4. See the sale on the merchant dashboard and **cash out to PayPal**; ask the AI assistant about sales, refunds, cash-outs and invoices.
 5. Close the wallet and get the balance **refunded to PayPal**.
 
 ---
@@ -37,11 +37,12 @@ Someone can run the stack and:
 | Zapier events | implemented | not run against a live Zap |
 | Elastic activity index + assistant search | implemented | request format verified against a mock server only |
 | OpenAPI spec | done | Redocly lint: valid |
-| Postman collection | done | Newman: 13 requests, 16/16 assertions (last run before the demo mode and refund changes) |
+| Postman collection | done | Newman: 15 requests, 19/19 assertions, including cash-out and a refused refund after cash-out |
 | "Try the demo" (one-tap shop + customer per visitor) | implemented | tests: off unless `DEMO_MODE`, isolated per visitor, never touches PayPal, per-visitor limit; browser run end to end |
 | Merchant refunds | implemented | only from money PulsePay still holds for the merchant (not after a payout); tests |
-| Automated tests | 110 | `npm run test:db` (real Postgres, local PayPal and Bedrock stand-ins); every test mutation-checked |
-| Render blueprint | written | not deployed from here |
+| Automated tests | 126 | `npm run test:db` (real Postgres, local PayPal and Bedrock stand-ins); every test mutation-checked |
+| Hosted demo (one container: API + web app + CV service) | implemented | tests: page serving, frame forwarding, size cap, same-site requests; the image ran the demo end to end in a browser at Render free-plan limits (0.1 CPU, 512 MB), Bedrock live |
+| Render blueprint | written | validated against Render's published schema; not deployed yet (needs a Render account) |
 | Family / delegates | API only | deferred from MVP |
 
 ---
