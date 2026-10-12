@@ -28,7 +28,7 @@ Someone can run the stack and:
 | Distress finger (capped $25, silent SOS, AML alert, same screens) | implemented | end-to-end tests |
 | **PayPal Checkout top-up** (JS SDK v6 + Orders v2 create/capture) | implemented | REST client tested against a local fake PayPal (declines, lost responses, amount mismatch, unconfirmed-capture sweep). **Live sandbox:** OAuth, order creation and the refusal to capture an unapproved order verified; buyer approval + capture still to run in a browser |
 | **Refund to PayPal captures** on wallet close | implemented | fake PayPal: newest capture first, retry after failure, lost response refunded once; live sandbox pending |
-| **PayPal Payouts** to merchants (instant + cash-out) and payees | implemented | fake PayPal: pending to success, returned items, lost response paid once, 5xx retried. **Live sandbox:** refused with `PAYOUT_NOT_AVAILABLE` until Payouts is enabled on the sandbox app |
+| **PayPal Payouts** to merchants (instant + cash-out) and payees | implemented | fake PayPal: pending to success, returned items, lost response paid once, 5xx retried. **Live sandbox:** refused with `PAYOUT_NOT_AVAILABLE` ("You live in a country that is not allowed to send this payout"): PayPal blocks payouts from India-based sandbox accounts; needs a US business sandbox account |
 | **PayPal webhooks** (signature-verified; payouts, disputes, invoices) | implemented | fake PayPal: verified, unverified, redelivered and duplicate events; real deliveries need a public URL (Render) |
 | Double-entry ledger (wallet / pool / merchant / payee) | implemented | every group balanced; wallet balances and the pool reconcile in tests |
 | AI merchant assistant (GLM on Bedrock) | implemented | **live** against Bedrock: sales, anomalies, refund proposal; tests against a local Bedrock stand-in: proposals only, masked customers, demo question cap |
@@ -81,7 +81,7 @@ Holding customer balances like this needs PayPal's approval for Payouts and a co
 
 | Item | Blocker |
 |---|---|
-| Live sandbox: buyer-approved top-up, payout, refund | Payouts enabled on the sandbox app; one browser run with the sandbox buyer |
+| Live sandbox: buyer-approved top-up, payout, refund | a US business sandbox account (for payouts); one browser run with the sandbox buyer |
 | GLM 5.3 | not enabled on the Bedrock account (GLM 5 used automatically) |
 | Webhooks verified end-to-end | public URL (Render deploy) + `PAYPAL_WEBHOOK_ID` |
 | Real fingerprint capture | external scanner hardware |

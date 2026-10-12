@@ -379,7 +379,7 @@ function BankScreen({
             </div>
             <div>
               <div className="text-sm font-semibold text-[var(--dark-green)]">Funded with PayPal</div>
-              <div className="text-xs text-[var(--muted-foreground)]">{wallet.funded_by === "simulated" ? "Simulated PayPal (no keys on the server)" : wallet.paypal_payer || "PayPal sandbox"}</div>
+              <div className="text-xs text-[var(--muted-foreground)]">{wallet.funded_by === "simulated" ? "Simulated PayPal (no real money)" : wallet.paypal_payer || "PayPal sandbox"}</div>
             </div>
           </div>
           <dl className="mt-4 space-y-2 text-sm">

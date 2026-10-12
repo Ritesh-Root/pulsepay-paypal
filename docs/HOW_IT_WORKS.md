@@ -208,6 +208,7 @@ Merchants can ask in plain language: "How much did I take today?", "Anything unu
 - **Model:** GLM on Amazon Bedrock (GLM 5.3, falling back to GLM 5 when 5.3 isn't enabled on the account).
 - **Tools it can call:** sales summary, recent payments, payout status, anomaly report, and (when Elastic is configured) activity search. With PayPal configured, it can create and send **PayPal invoices** and QR codes through the **PayPal Agent Toolkit**, scoped to the merchant's own invoices.
 - **It only proposes money movements.** Refunds and cash-outs come back as proposals with a **Confirm** button; a person taps it. The assistant sees customers masked and never sees distress data.
+- **Only collected money is credited.** A paid invoice reaches the shop's balance only when PayPal reports it `PAID` (money PayPal collected), never `MARKED_AS_PAID` (a payment recorded outside PayPal).
 
 ## Limits and why they exist
 

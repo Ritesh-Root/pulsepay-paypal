@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
-import { AllCommunityModule, ModuleRegistry, themeQuartz, type ColDef } from "ag-grid-community";
+import { AllCommunityModule, ModuleRegistry, themeQuartz, type ColDef, type GridSizeChangedEvent } from "ag-grid-community";
 import { AgCharts } from "ag-charts-react";
 import { AllCommunityModule as ChartsCommunity, ModuleRegistry as ChartsRegistry } from "ag-charts-community";
 import { AlertTriangle, Info, RefreshCw, Send, XCircle } from "lucide-react";
@@ -19,6 +19,7 @@ const gridTheme = themeQuartz.withParams({
   headerBackgroundColor: "#ecfadc",
   borderColor: "rgba(26, 61, 46, 0.08)",
   fontSize: 12,
+  cellHorizontalPadding: 10,
   rowHeight: 36,
   headerHeight: 34,
   wrapperBorderRadius: 16,
@@ -26,6 +27,15 @@ const gridTheme = themeQuartz.withParams({
 
 const usd = (cents: number) => `${Number(cents) < 0 ? "-" : ""}$${(Math.abs(Number(cents)) / 100).toFixed(2)}`;
 const time = (iso: string) => new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+// The app is phone-sized even on a desktop, so the payments grid shows "Verified by" only when it is wide enough.
+const fitColumns = (e: GridSizeChangedEvent) => e.api.setColumnsVisible(["method"], e.clientWidth >= 440);
+// Grids live on a phone: today's rows show only the time, older ones only the date (full time on hover).
+const shortTime = (iso: string) => {
+  const d = new Date(iso);
+  return d.toDateString() === new Date().toDateString()
+    ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+    : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+};
 
 type Dashboard = {
   balance: { owed: number; in_flight: number; available: number };
@@ -76,17 +86,25 @@ export function MerchantDashboard({ token, onSignOut }: { token: string; onSignO
     void load();
   }
 
+  const verified = (p: { value: unknown; data: any }) =>
+    p.data.kind === "merchant_refund" ? "refund" : String(p.value || "").replace("fingerprint", "finger").replace("+pin", " + PIN");
+
   const txCols = useMemo<ColDef[]>(() => [
-    { field: "created_at", headerName: "Time", valueFormatter: (p) => time(p.value), flex: 1.2, sort: "desc" },
-    { field: "customer", headerName: "Customer", flex: 1.1 },
+    { field: "created_at", headerName: "Time", valueFormatter: (p) => shortTime(p.value), tooltipValueGetter: (p) => time(p.value), flex: 1, minWidth: 64, sort: "desc" },
     {
-      field: "amount_cents", headerName: "Amount", flex: 0.8, type: "rightAligned",
-      valueFormatter: (p) => `${p.data.kind === "merchant_refund" ? "-" : ""}${usd(p.value)}`,
-      cellClass: (p) => (p.data.kind === "merchant_refund" ? "text-red-600" : "font-semibold"),
+      field: "customer", headerName: "Customer", flex: 1, minWidth: 78,
+      valueFormatter: (p) => String(p.value || "").replace(/^Customer\s*/, ""),
+      tooltipValueGetter: (p) => `${p.value} · ${verified({ value: p.data.method, data: p.data })}`,
     },
-    { field: "method", headerName: "Verified by", flex: 1, valueFormatter: (p) => (p.data.kind === "merchant_refund" ? "refund" : String(p.value || "").replace("+pin", " + PIN")) },
     {
-      headerName: "", flex: 0.8, sortable: false, filter: false,
+      field: "amount_cents", headerName: "Amount", flex: 1, minWidth: 70, type: "rightAligned",
+      valueFormatter: (p) => `${p.data.kind === "merchant_refund" ? "-" : ""}${usd(p.value)}`,
+      cellClass: (p) => ["ag-right-aligned-cell", p.data.kind === "merchant_refund" ? "text-red-600" : "font-semibold"],
+    },
+    // Shown only when the grid has room (see fitColumns); always in the customer tooltip.
+    { field: "method", headerName: "Verified by", flex: 1.1, minWidth: 92, hide: true, valueFormatter: verified },
+    {
+      headerName: "", flex: 0.8, minWidth: 68, sortable: false, filter: false,
       cellRenderer: (p: any) => p.data.kind !== "payment" ? null : p.data.refunded
         ? <span className="text-[11px] text-[var(--muted-foreground)]">refunded</span>
         : <button type="button" className="rounded-full bg-[var(--chip)] px-2 py-0.5 text-[11px] font-semibold text-[var(--dark-green)]"
@@ -95,10 +113,10 @@ export function MerchantDashboard({ token, onSignOut }: { token: string; onSignO
   ], []);
 
   const payoutCols = useMemo<ColDef[]>(() => [
-    { field: "created_at", headerName: "Started", valueFormatter: (p) => time(p.value), flex: 1.2 },
-    { field: "amount_cents", headerName: "Amount", valueFormatter: (p) => usd(p.value), flex: 0.8, type: "rightAligned" },
+    { field: "created_at", headerName: "Started", valueFormatter: (p) => shortTime(p.value), tooltipValueGetter: (p) => time(p.value), flex: 1, minWidth: 66 },
+    { field: "amount_cents", headerName: "Amount", valueFormatter: (p) => usd(p.value), flex: 1, minWidth: 72, type: "rightAligned" },
     {
-      field: "status", headerName: "PayPal status", flex: 1,
+      field: "status", headerName: "PayPal status", flex: 1.2, minWidth: 120,
       cellRenderer: (p: any) => (
         <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold",
           p.value === "SUCCESS" ? "bg-emerald-100 text-emerald-800"
@@ -159,7 +177,7 @@ export function MerchantDashboard({ token, onSignOut }: { token: string; onSignO
         <h2 className="mb-1.5 px-1 text-sm font-semibold text-[var(--dark-green)]">Payments</h2>
         <div style={{ height: 260 }}>
           <AgGridReact theme={gridTheme} rowData={data.transactions} columnDefs={txCols} getRowId={(p) => p.data.id}
-            overlayNoRowsTemplate="No payments yet" suppressCellFocus />
+            onGridSizeChanged={fitColumns} overlayNoRowsTemplate="No payments yet" suppressCellFocus />
         </div>
       </section>
 
