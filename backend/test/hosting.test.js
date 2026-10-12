@@ -78,6 +78,39 @@ describe('serving the web app', () => {
         } finally { await app.close(); }
     });
 
+    it('answers 404 for a missing file instead of the page (a stale chunk after a redeploy)', async () => {
+        const app = await appWith({ FRONTEND_DIR: dir });
+        try {
+            const r = await fetch(app.base + '/assets/merchant-dashboard-OLDHASH.js');
+            assert.equal(r.status, 404);
+            assert.doesNotMatch(r.headers.get('content-type'), /html/);
+        } finally { await app.close(); }
+    });
+
+    it('gives /index.html the same headers as /', async () => {
+        const app = await appWith({ FRONTEND_DIR: dir });
+        try {
+            const r = await fetch(app.base + '/index.html');
+            assert.equal(r.status, 200);
+            assert.equal(r.headers.get('cross-origin-opener-policy'), 'same-origin-allow-popups');
+            assert.match(r.headers.get('cache-control'), /no-cache/);
+        } finally { await app.close(); }
+    });
+
+    it('caches for good only the hashed files in the build\'s own assets folder', async () => {
+        const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'pulsepay-'));
+        const nested = path.join(parent, 'assets', 'web'); // the build folder itself sits under "assets"
+        fs.mkdirSync(path.join(nested, 'assets'), { recursive: true });
+        fs.writeFileSync(path.join(nested, 'index.html'), '<!doctype html>');
+        fs.writeFileSync(path.join(nested, 'robots.txt'), 'User-agent: *');
+        fs.writeFileSync(path.join(nested, 'assets', 'app-9z.js'), '1');
+        const app = await appWith({ FRONTEND_DIR: nested });
+        try {
+            assert.doesNotMatch((await fetch(app.base + '/robots.txt')).headers.get('cache-control'), /immutable/);
+            assert.match((await fetch(app.base + '/assets/app-9z.js')).headers.get('cache-control'), /immutable/);
+        } finally { await app.close(); fs.rmSync(parent, { recursive: true, force: true }); }
+    });
+
     it('serves no web app when no build folder is configured', async () => {
         const app = await appWith({});
         try {

@@ -169,7 +169,7 @@ docker compose --profile test up -d postgres-test   # throwaway Postgres on 127.
 cd backend && npm run test:db
 ```
 
-126 tests: the ledger, biometric matching, the merchant terminal over HTTP (scan, PIN, lockout, distress, "both" mode), payouts, top-ups, refunds, webhooks, the AI assistant (against a local Bedrock stand-in), the demo mode, database upgrades and the one-URL hosting. The PayPal tests run the real client against [a local stand-in for the PayPal API](backend/test/support/fake-paypal.js) that follows PayPal's documented behaviour, including lost responses and duplicate requests. Every test was checked by breaking the code it protects and confirming it fails. `npm test` alone runs the tests that need no database.
+137 tests: the ledger, biometric matching, the merchant terminal over HTTP (scan, PIN, lockout, distress, "both" mode), payouts, top-ups, refunds, webhooks, the AI assistant (against a local Bedrock stand-in), the demo mode, database upgrades and the one-URL hosting. The PayPal tests run the real client against [a local stand-in for the PayPal API](backend/test/support/fake-paypal.js) that follows PayPal's documented behaviour, including lost responses and duplicate requests. Every test was checked by breaking the code it protects and confirming it fails. `npm test` alone runs the tests that need no database.
 
 The Postman collection runs the demo flow against a running server (15 requests, 19 checks):
 

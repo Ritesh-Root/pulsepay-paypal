@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const KEY_REF = 'kms:data-key:v1';
 
 function loadDataKey() {
-    const raw = process.env.KMS_DATA_KEY;
+    const raw = (process.env.KMS_DATA_KEY || '').trim();
     if (!raw) {
         throw new Error(
             'FATAL: KMS_DATA_KEY is not set. Biometric templates cannot be encrypted. ' +

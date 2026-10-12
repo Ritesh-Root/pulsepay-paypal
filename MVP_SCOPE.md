@@ -26,13 +26,13 @@ Someone can run the stack and:
 | Pay session (identify → amount → PIN, single use, 2 min, cancel) | implemented | end-to-end tests |
 | PIN lockout (3 tries / 30 min) | implemented | end-to-end tests |
 | Distress finger (capped $25, silent SOS, AML alert, same screens) | implemented | end-to-end tests |
-| **PayPal Checkout top-up** (JS SDK v6 + Orders v2 create/capture) | implemented | REST client tested against a local fake PayPal (declines, lost responses, amount mismatch, unconfirmed-capture sweep); **live sandbox not yet run** (needs your sandbox keys) |
+| **PayPal Checkout top-up** (JS SDK v6 + Orders v2 create/capture) | implemented | REST client tested against a local fake PayPal (declines, lost responses, amount mismatch, unconfirmed-capture sweep). **Live sandbox:** OAuth, order creation and the refusal to capture an unapproved order verified; buyer approval + capture still to run in a browser |
 | **Refund to PayPal captures** on wallet close | implemented | fake PayPal: newest capture first, retry after failure, lost response refunded once; live sandbox pending |
-| **PayPal Payouts** to merchants (instant + cash-out) and payees | implemented | fake PayPal: pending to success, returned items, lost response paid once, 5xx retried; live sandbox pending |
+| **PayPal Payouts** to merchants (instant + cash-out) and payees | implemented | fake PayPal: pending to success, returned items, lost response paid once, 5xx retried. **Live sandbox:** refused with `PAYOUT_NOT_AVAILABLE` until Payouts is enabled on the sandbox app |
 | **PayPal webhooks** (signature-verified; payouts, disputes, invoices) | implemented | fake PayPal: verified, unverified, redelivered and duplicate events; real deliveries need a public URL (Render) |
 | Double-entry ledger (wallet / pool / merchant / payee) | implemented | every group balanced; wallet balances and the pool reconcile in tests |
 | AI merchant assistant (GLM on Bedrock) | implemented | **live** against Bedrock: sales, anomalies, refund proposal; tests against a local Bedrock stand-in: proposals only, masked customers, demo question cap |
-| Assistant PayPal invoice tools (Agent Toolkit) | implemented | needs PayPal sandbox keys; not yet run live |
+| Assistant PayPal invoice tools (Agent Toolkit) | implemented | **live sandbox:** create, send, status and QR code verified. The live run exposed that the toolkit returns JSON encoded twice (status was never read); fixed and covered by tests. Only invoices PayPal collected (`PAID`) are credited, never ones marked paid by hand |
 | Merchant dashboard (AG Grid + AG Charts) | implemented | browser |
 | Zapier events | implemented | not run against a live Zap |
 | Elastic activity index + assistant search | implemented | request format verified against a mock server only |
@@ -40,7 +40,7 @@ Someone can run the stack and:
 | Postman collection | done | Newman: 15 requests, 19/19 assertions, including cash-out and a refused refund after cash-out |
 | "Try the demo" (one-tap shop + customer per visitor) | implemented | tests: off unless `DEMO_MODE`, isolated per visitor, never touches PayPal, per-visitor limit; browser run end to end |
 | Merchant refunds | implemented | only from money PulsePay still holds for the merchant (not after a payout); tests |
-| Automated tests | 126 | `npm run test:db` (real Postgres, local PayPal and Bedrock stand-ins); every test mutation-checked |
+| Automated tests | 137 | `npm run test:db` (real Postgres, local PayPal and Bedrock stand-ins); every test mutation-checked |
 | Hosted demo (one container: API + web app + CV service) | implemented | tests: page serving, frame forwarding, size cap, same-site requests; the image ran the demo end to end in a browser at Render free-plan limits (0.1 CPU, 512 MB), Bedrock live |
 | Render blueprint | written | validated against Render's published schema; not deployed yet (needs a Render account) |
 | Family / delegates | API only | deferred from MVP |
@@ -81,7 +81,7 @@ Holding customer balances like this needs PayPal's approval for Payouts and a co
 
 | Item | Blocker |
 |---|---|
-| Run the live PayPal sandbox flow (top-up, payout, refund, invoices) | sandbox Client ID / Secret in `.env` |
+| Live sandbox: buyer-approved top-up, payout, refund | Payouts enabled on the sandbox app; one browser run with the sandbox buyer |
 | GLM 5.3 | not enabled on the Bedrock account (GLM 5 used automatically) |
 | Webhooks verified end-to-end | public URL (Render deploy) + `PAYPAL_WEBHOOK_ID` |
 | Real fingerprint capture | external scanner hardware |

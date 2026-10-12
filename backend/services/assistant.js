@@ -182,7 +182,9 @@ async function runTool(name, input, ctx) {
                 const status = inv.status || inv.detail?.status || null;
                 const paid = inv.payments?.paid_amount?.value || null;
                 if (status) await invoices.setStatus(pool, id, status);
-                if (status === 'PAID' || status === 'MARKED_AS_PAID') await invoices.creditIfPaid(pool, id, paid || inv.amount?.value);
+                // Only PAID means PayPal collected the money; MARKED_AS_PAID records a payment
+                // made outside PayPal, which never reached PulsePay's pool.
+                if (status === 'PAID') await invoices.creditIfPaid(pool, id, paid || inv.amount?.value);
                 return { invoice_id: id, status, amount: inv.amount?.value || null, paid_amount: paid };
             }
             const qr = await runToolkit('generate_invoice_qr_code', { invoice_id: id, width: 300, height: 300 });

@@ -5,12 +5,18 @@
 set -uo pipefail
 cd /app
 
-node backend/scripts/migrate.js || exit 1
+# Set before anything starts, so a stop request at any point stops both processes
+# cleanly (during the migration, nothing is started afterwards).
+stop() { kill -TERM $(jobs -p) 2>/dev/null; wait; exit 143; }
+trap stop TERM INT
+
+# In the background so a stop request can interrupt it (bash runs traps only between commands).
+node backend/scripts/migrate.js &
+wait $! || exit 1
 
 /opt/cv/bin/uvicorn main:app --app-dir cv-service --host 127.0.0.1 --port 8000 &
 node backend/server.js &
 
-trap 'kill -TERM $(jobs -p) 2>/dev/null' TERM INT
 wait -n
 code=$?
 kill -TERM $(jobs -p) 2>/dev/null

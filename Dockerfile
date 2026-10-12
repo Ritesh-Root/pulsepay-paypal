@@ -7,7 +7,7 @@
 #   docker run -p 10000:10000 --env-file .env -e DATABASE_URL=... pulsepay
 
 # --- web app ------------------------------------------------------------------
-FROM node:20-bookworm-slim AS web
+FROM node:22-bookworm-slim AS web
 WORKDIR /web
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -16,9 +16,10 @@ COPY frontend/ ./
 RUN VITE_API_URL=/ VITE_CV_URL=/cv npm run build
 
 # --- runtime: Node backend + Python CV service -------------------------------------
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
+# opencv-python-headless needs no libGL or GUI libraries.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv libgl1 libglib2.0-0 \
+    && apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 

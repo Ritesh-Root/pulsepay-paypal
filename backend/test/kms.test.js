@@ -6,7 +6,11 @@ const crypto = require('crypto');
 const kms = require('../services/kms');
 
 const saved = process.env.KMS_DATA_KEY;
-afterEach(() => { process.env.KMS_DATA_KEY = saved; });
+afterEach(() => {
+    // Assigning undefined to process.env stores the string "undefined".
+    if (saved === undefined) delete process.env.KMS_DATA_KEY;
+    else process.env.KMS_DATA_KEY = saved;
+});
 
 function roundTrip() {
     const sealed = kms.encrypt(Buffer.from('template'));
@@ -17,6 +21,16 @@ describe('KMS data key', () => {
     it('accepts 64 hex characters', () => {
         process.env.KMS_DATA_KEY = crypto.randomBytes(32).toString('hex');
         assert.equal(roundTrip(), 'template');
+    });
+
+    it('ignores whitespace around the key (a trailing newline from a secrets file)', () => {
+        const key = crypto.randomBytes(32);
+        process.env.KMS_DATA_KEY = key.toString('hex');
+        const sealed = kms.encrypt(Buffer.from('template'));
+        for (const padded of [`${key.toString('hex')}\n`, `  ${key.toString('base64')} \n`]) {
+            process.env.KMS_DATA_KEY = padded;
+            assert.equal(kms.decrypt(sealed.ciphertext, sealed.iv, sealed.tag).toString(), 'template');
+        }
     });
 
     it("accepts base64 of 32 bytes (Render's generateValue)", () => {
