@@ -41,10 +41,23 @@ function paypalToolkit() {
     return toolkit;
 }
 
+/**
+ * The toolkit answers in text, and the JSON inside is often encoded twice (a JSON string
+ * holding JSON). Decode until it is an object; anything else (the QR code is a multipart
+ * body) comes back as { raw }.
+ */
+function parseToolkitText(text) {
+    if (!text) return {};
+    let value = text;
+    for (let i = 0; i < 2 && typeof value === 'string'; i++) {
+        try { value = JSON.parse(value); } catch { break; }
+    }
+    return value && typeof value === 'object' ? value : { raw: String(value) };
+}
+
 async function runToolkit(name, input) {
     const out = await paypalToolkit().handleToolCall({ toolUseId: 'internal', name, input });
-    const text = out.content?.[0]?.text || '{}';
-    try { return JSON.parse(text); } catch { return { raw: text }; }
+    return parseToolkitText(out.content?.[0]?.text);
 }
 
 const spec = (name, description, properties = {}, required = []) => ({
@@ -173,7 +186,7 @@ async function runTool(name, input, ctx) {
                 return { invoice_id: id, status, amount: inv.amount?.value || null, paid_amount: paid };
             }
             const qr = await runToolkit('generate_invoice_qr_code', { invoice_id: id, width: 300, height: 300 });
-            const b64 = typeof qr === 'string' ? qr : (qr.raw || qr.image || JSON.stringify(qr));
+            const b64 = qr.raw || qr.image || JSON.stringify(qr);
             const match = String(b64).match(/[A-Za-z0-9+/=]{200,}/);
             if (match) actions.push({ type: 'qr', invoice_id: id, image_base64: match[0] });
             return { invoice_id: id, qr_code: match ? 'shown to the merchant' : 'not available' };
@@ -253,4 +266,4 @@ async function chat(pool, merchant, history) {
     return { reply, actions, tools_used: toolsUsed, model: modelId, paypal_tools: rails.live() };
 }
 
-module.exports = { chat, toolSpecs, runTool, toBedrockMessages };
+module.exports = { chat, toolSpecs, runTool, toBedrockMessages, parseToolkitText };
